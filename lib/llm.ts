@@ -9,7 +9,12 @@ export type LlmProvider = "openai" | "anthropic";
 
 export function getModel(provider: LlmProvider): LanguageModel {
   if (provider === "openai") {
-    return openai(process.env.OPENAI_MODEL || "gpt-5.4-mini");
+    // structuredOutputs: false avoids OpenAI's strict json_schema mode, which
+    // requires every schema property to be listed in `required` and rejects
+    // the `.optional()` fields our Zod schemas rely on (see lib/schema.ts).
+    return openai(process.env.OPENAI_MODEL || "gpt-5.4-mini", {
+      structuredOutputs: false,
+    });
   }
   return anthropic(process.env.ANTHROPIC_MODEL || "claude-sonnet-4-5");
 }
@@ -26,6 +31,7 @@ export async function generateStructured<T>(opts: {
     system: opts.system,
     prompt: opts.prompt,
     temperature: 0.2,
+    mode: "json",
   });
   return object;
 }

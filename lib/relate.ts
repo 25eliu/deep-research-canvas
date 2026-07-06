@@ -65,6 +65,7 @@ export function validateGraph(state: CanvasState, opts: { maxDegree?: number } =
     if (seen.has(e.id)) continue;
     if (!nodeIds.has(e.from) || !nodeIds.has(e.to)) continue;
     if (e.from === e.to) continue;
+    if (g.hasEdge(e.from, e.to)) continue; // same pair already linked under a different edge id
     if (g.inDegree(e.to) >= maxDegree) continue;
     if (isReachable(g, e.to, e.from)) continue; // would close a cycle
     seen.add(e.id);
