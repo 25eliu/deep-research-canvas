@@ -11,21 +11,42 @@ export function sanitizeOps(
   for (const op of ops) {
     if (!op || typeof (op as any).op !== "string") continue;
     if (((op as any).op === "add_node" || (op as any).op === "upsert_node") && (op as any).node) {
-      const n = (op as any).node;
-      if (n.position == null) n.position = null;
-      if (n.type === "data_card") {
+      const origNode = (op as any).node;
+      let newNode = { ...origNode };
+
+      // Normalize position
+      if (newNode.position == null) newNode.position = null;
+
+      if (newNode.type === "data_card") {
         if (!opt.allowTako) {
-          delete n.tako;
-          n.grounding = "model";
-        } else if (n.tako && opt.validCardIds && !opt.validCardIds.has(n.tako.cardId)) {
-          delete n.tako;
-          n.grounding = "model";
-          n.confidence = Math.min(typeof n.confidence === "number" ? n.confidence : 0.4, 0.4);
+          // Remove tako and set grounding to model
+          const { tako, ...nodeWithoutTako } = newNode;
+          newNode = { ...nodeWithoutTako, grounding: "model" };
+        } else if (newNode.tako && opt.validCardIds && !opt.validCardIds.has(newNode.tako.cardId)) {
+          // Remove invalid tako, set grounding to model, cap confidence
+          const { tako, ...nodeWithoutTako } = newNode;
+          newNode = {
+            ...nodeWithoutTako,
+            grounding: "model",
+            confidence: Math.min(typeof newNode.confidence === "number" ? newNode.confidence : 0.4, 0.4),
+          };
         }
       }
-      if (typeof n.confidence !== "number") n.confidence = opt.allowTako && n.tako ? 0.9 : 0.5;
+
+      // Backfill confidence if not numeric
+      if (typeof newNode.confidence !== "number") {
+        newNode = {
+          ...newNode,
+          confidence: opt.allowTako && newNode.tako ? 0.9 : 0.5,
+        };
+      }
+
+      // Push modified op with new node
+      out.push({ ...op, node: newNode } as CanvasOp);
+    } else {
+      // Non-node ops pass through unchanged
+      out.push(op as CanvasOp);
     }
-    out.push(op as CanvasOp);
   }
   return out;
 }
