@@ -1,15 +1,14 @@
 "use client";
 import { useCallback, useMemo, useRef, useState } from "react";
-import type { AgentResponse, CanvasNode, CanvasState } from "@/lib/schema";
+import type { CanvasNode, CanvasState } from "@/lib/schema";
 import { applyOps } from "@/lib/schema";
 import NodeCard, { NODE_W } from "@/components/NodeCard";
 
-type Provider = "gpt" | "claude" | "gpt_tako" | "claude_tako";
-const PROVIDERS: { id: Provider; label: string; grounded: boolean }[] = [
-  { id: "gpt", label: "GPT (baseline)", grounded: false },
-  { id: "claude", label: "Claude (baseline)", grounded: false },
-  { id: "gpt_tako", label: "GPT + Tako", grounded: true },
-  { id: "claude_tako", label: "Claude + Tako", grounded: true },
+type Provider = "gpt" | "claude" | "tako";
+const PROVIDERS: { id: Provider; label: string }[] = [
+  { id: "tako", label: "LLM + Tako" },
+  { id: "gpt", label: "GPT" },
+  { id: "claude", label: "Claude" },
 ];
 const EDGE_COLOR: Record<string, string> = {
   supports: "var(--supports)", contradicts: "var(--contradicts)", feeds: "var(--feeds)",
@@ -50,7 +49,7 @@ function computeLayout(nodes: CanvasNode[]): Record<string, { x: number; y: numb
 }
 
 export default function Page() {
-  const [provider, setProvider] = useState<Provider>("gpt_tako");
+  const [provider, setProvider] = useState<Provider>("tako");
   const [takoAnswer, setTakoAnswer] = useState(false);
   const [state, setState] = useState<CanvasState>({ nodes: [], edges: [] });
   const [selection, setSelection] = useState<string[]>([]);
@@ -60,6 +59,8 @@ export default function Page() {
   const [sideInput, setSideInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [loadingStage, setLoadingStage] = useState<string>("");
+  const [lastTrace, setLastTrace] = useState<any>(null);
   const [view, setView] = useState({ x: 0, y: 0, scale: 1 });
 
   const pos = useMemo(() => computeLayout(state.nodes), [state.nodes]);
@@ -71,20 +72,42 @@ export default function Page() {
     (surface === "main" ? setMainLog : setSideLog)((l) => [...l, { role: "user", text }]);
     try {
       const res = await fetch("/api/agent", {
-        method: "POST", headers: { "Content-Type": "application/json" },
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          canvasId: "default", message: text, surface, canvasState: state,
+          canvasId: "default", message: text, surface,
+          canvasState: state,
           selection: { nodeIds: selection, nodes: selection.map((id) => nodeById[id]).filter(Boolean) },
           providerId: provider, takoAnswerEnabled: takoAnswer,
         }),
       });
-      const data: AgentResponse & { error?: string } = await res.json();
-      if (data.error) throw new Error(data.error);
-      if (data.canvasOps?.length) setState((s) => applyOps(s, data.canvasOps));
-      if (surface === "main" && data.narration) setMainLog((l) => [...l, { role: "assistant", text: data.narration }]);
-      if (data.sideReply) setSideLog((l) => [...l, { role: "assistant", text: data.sideReply! }]);
+      if (!res.body) throw new Error("no response stream");
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const lines = buf.split("\n");
+        buf = lines.pop() || "";
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          const evt = JSON.parse(line);
+          if (evt.type === "trace") {
+            setLoadingStage(evt.stage as string);
+          } else if (evt.type === "error") {
+            setError(evt.error);
+          } else if (evt.type === "result") {
+            if (evt.canvasOps?.length) setState((s) => applyOps(s, evt.canvasOps));
+            if (surface === "main") setMainLog((l) => [...l, { role: "agent", text: evt.narration || "" }]);
+            if (evt.sideReply) setSideLog((l) => [...l, { role: "agent", text: evt.sideReply }]);
+            setLastTrace(evt.trace);
+          }
+        }
+      }
     } catch (e: any) { setError(String(e?.message || e)); }
-    finally { setLoading(false); }
+    finally { setLoading(false); setLoadingStage(""); }
   }, [state, selection, nodeById, provider, takoAnswer, loading]);
 
   // ---- panning + node dragging ----
@@ -161,6 +184,7 @@ export default function Page() {
         {/* Main chat */}
         <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, zIndex: 10, padding: 12, background: "linear-gradient(transparent, var(--bg) 40%)" }}>
           {error && <div style={{ color: "var(--contradicts)", fontSize: 12, marginBottom: 6 }}>{error}</div>}
+          {loading && loadingStage && <div style={{ color: "var(--muted)", fontSize: 12, marginBottom: 6 }}>{loadingStage}</div>}
           <div style={{ maxHeight: 120, overflowY: "auto", marginBottom: 8 }}>
             {mainLog.slice(-4).map((m, i) => (
               <div key={i} style={{ fontSize: 12, color: m.role === "user" ? "var(--text)" : "var(--muted)", margin: "2px 0" }}>
