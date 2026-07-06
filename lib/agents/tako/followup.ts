@@ -13,17 +13,24 @@ export async function runTakoFollowup(
   onTrace?: TraceFn,
 ): Promise<{ body: AgentBody; validCardIds: Set<string>; trace: Partial<TurnTrace> }> {
   const notes: string[] = [];
-  onTrace?.({ stage: "asking Tako" });
   let answer = "";
   let cards: { cardId: string; title: string; webpageUrl?: string }[] = [];
-  try {
-    const res = await takoAnswer(req.message, { effort: "fast" });
-    answer = res.answer;
-    cards = res.cards.map((c) => ({ cardId: c.cardId, title: c.title, webpageUrl: c.webpageUrl }));
-  } catch (e: any) {
-    notes.push(`Tako Answer unavailable (${e?.message ?? e})`);
+  const answerEnabled = req.takoAnswerEnabled !== false;
+
+  if (answerEnabled) {
+    onTrace?.({ stage: "asking Tako" });
+    try {
+      const res = await takoAnswer(req.message, { effort: "fast" });
+      answer = res.answer;
+      cards = res.cards.map((c) => ({ cardId: c.cardId, title: c.title, webpageUrl: c.webpageUrl }));
+    } catch (e: any) {
+      notes.push(`Tako Answer unavailable (${e?.message ?? e})`);
+    }
+    onTrace?.({ stage: `Tako answered with ${cards.length} cards` });
+  } else {
+    notes.push("Tako Answer disabled — mapping from existing board context");
+    onTrace?.({ stage: "Tako Answer disabled — mapping from existing board context" });
   }
-  onTrace?.({ stage: `Tako answered with ${cards.length} cards` });
 
   const body = await generateStructured({
     provider: OPENAI, system: FOLLOWUP_SYSTEM,
@@ -37,7 +44,7 @@ export async function runTakoFollowup(
     validCardIds,
     trace: {
       queries: [req.message],
-      answerUsed: true,
+      answerUsed: answerEnabled,
       cards: cards.map((c) => ({ id: c.cardId, title: c.title, url: c.webpageUrl || "" })),
       notes,
     },

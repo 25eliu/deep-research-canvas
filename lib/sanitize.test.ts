@@ -44,4 +44,44 @@ describe("sanitizeOps", () => {
     expect(n.confidence).toBe(0.5);
     expect(n.position).toBeNull();
   });
+
+  it("strips tako ref from a baseline update_node patch and forces grounding=model", () => {
+    const out = sanitizeOps(
+      [{ op: "update_node", id: "c1", patch: { tako: { cardId: "REAL" }, grounding: "tako" } }],
+      { allowTako: false },
+    );
+    const patch = (out[0] as any).patch;
+    expect(patch.tako).toBeUndefined();
+    expect(patch.grounding).toBe("model");
+  });
+
+  it("drops a hallucinated cardId in an update_node patch and downgrades", () => {
+    const out = sanitizeOps(
+      [{ op: "update_node", id: "c1", patch: { tako: { cardId: "FAKE" }, grounding: "tako", confidence: 0.9 } }],
+      { allowTako: true, validCardIds: new Set(["REAL"]) },
+    );
+    const patch = (out[0] as any).patch;
+    expect(patch.tako).toBeUndefined();
+    expect(patch.grounding).toBe("model");
+    expect(patch.confidence).toBeLessThanOrEqual(0.4);
+  });
+
+  it("keeps a real fetched cardId in an update_node patch", () => {
+    const out = sanitizeOps(
+      [{ op: "update_node", id: "c1", patch: { tako: { cardId: "REAL" }, grounding: "tako" } }],
+      { allowTako: true, validCardIds: new Set(["REAL"]) },
+    );
+    const patch = (out[0] as any).patch;
+    expect(patch.tako?.cardId).toBe("REAL");
+    expect(patch.grounding).toBe("tako");
+  });
+
+  it("passes update_node patches with no tako/grounding/confidence through unchanged", () => {
+    const out = sanitizeOps(
+      [{ op: "update_node", id: "c1", patch: { title: "New title" } }],
+      { allowTako: false },
+    );
+    const patch = (out[0] as any).patch;
+    expect(patch).toEqual({ title: "New title" });
+  });
 });
