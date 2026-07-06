@@ -9,6 +9,10 @@ import { BREAKDOWN_SYSTEM, COMPOSE_SYSTEM, SYNTH_SYSTEM } from "./prompts";
 
 const OPENAI = "openai" as const; // tako agent is fixed to gpt-5.4-mini via OPENAI_MODEL
 
+function errorMessage(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
+
 export async function runTakoInitial(
   req: AgentRequest,
   onTrace?: TraceFn,
@@ -23,10 +27,10 @@ export async function runTakoInitial(
     provider: OPENAI, system: BREAKDOWN_SYSTEM, prompt: ctxBlock(req), schema: zBreakdown,
   });
 
-  // 2) resolve + related (graph); degrade gracefully on error
+  // 2) resolve + related (graph); degrade gracefully per-entity on error
   const resolvedInfo: string[] = [];
-  try {
-    for (const name of breakdown.entities.slice(0, 6)) {
+  for (const name of breakdown.entities.slice(0, 6)) {
+    try {
       const nodes = await graphSearch(name, { types: "entity", subtype: breakdown.subtypes?.[name] });
       const node: GraphNode | undefined = nodes[0];
       if (!node) { notes.push(`No graph node for "${name}"`); continue; }
@@ -35,11 +39,12 @@ export async function runTakoInitial(
       const items = await graphRelated(node.id, { relationType: "metric", q: topic });
       related.push({ node: node.name, items: items.map((i) => i.name) });
       resolvedInfo.push(`${node.name}: ${items.slice(0, 5).map((i) => `${i.name} [${(i.aliases || []).join(", ")}]`).join("; ")}`);
+    } catch (e: unknown) {
+      notes.push(`graph lookup failed for "${name}" — ${errorMessage(e)}`);
+      continue;
     }
-    onTrace?.({ stage: `resolved ${resolved.length} graph nodes` });
-  } catch (e: any) {
-    notes.push(`graph unavailable — grounding on v3/search only (${e?.message ?? e})`);
   }
+  onTrace?.({ stage: `resolved ${resolved.length} graph nodes` });
 
   // 3) compose grounded queries
   const composePrompt = `${ctxBlock(req)}\n\nRESOLVED:\n${resolvedInfo.join("\n") || "(none — compose from the question directly)"}`;
@@ -47,7 +52,7 @@ export async function runTakoInitial(
     provider: OPENAI, system: COMPOSE_SYSTEM, prompt: composePrompt, schema: zQueries,
   });
   const queries = Array.from(new Set(composed.queries.map((q) => q.trim().toLowerCase())))
-    .map((q) => q).slice(0, 10);
+    .slice(0, 10);
 
   // 4) search concurrently, keep top card per query
   const settled = await Promise.allSettled(queries.map((q) => takoSearch(q, { effort: "fast", count: 3 })));
