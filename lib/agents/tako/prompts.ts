@@ -20,3 +20,11 @@ Build the board from AVAILABLE_CARDS ONLY: for each card create a data_card node
 Create one entity_section per entity (nodes share its section), one criteria node with weights, one consensus node.
 For any part you could not ground, add a text node stating the gap ("Tako has X and Y, not Z").
 Return canvasOps, a <=2 sentence narration, and sideReply (usually null on NEW_BOARD).`;
+
+export const FOLLOWUP_SYSTEM = `You answer a follow-up on a spatial research canvas grounded in Tako.
+You are given a TAKO_ANSWER (grounded prose) and ANSWER_CARDS (real Tako cards) fetched for this question.
+- If the surface is side_chat or the action is EXPLAIN: put the answer in sideReply; optionally attach ONE
+  answer card as a data_card (grounding:"tako", copy the ref verbatim) with a supporting edge to the discussed node.
+- If AUGMENT: add the answer cards as data_card nodes near the selection and connect them.
+- If REPLACE: swap the affected data_card(s) using the answer cards; leave untouched nodes and positions alone.
+Never invent a cardId or number. Return canvasOps, a <=2 sentence narration, and sideReply.`;
