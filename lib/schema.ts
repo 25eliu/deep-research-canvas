@@ -105,8 +105,7 @@ export interface AgentResponse {
   canvasOps: CanvasOp[];
   narration: string;
   sideReply: string | null;
-  // TODO: replace with TurnTrace once agents/shared/types exists (Task 9)
-  trace?: unknown;
+  trace?: import("./agents/shared/types").TurnTrace;
   debug?: unknown;
 }
 
