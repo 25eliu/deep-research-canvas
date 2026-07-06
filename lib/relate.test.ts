@@ -31,6 +31,23 @@ describe("relate", () => {
     expect(out.edges.map((e) => e.id)).toEqual(["x"]);
   });
 
+  it("drops an edge that would close a cycle", () => {
+    const cyclic: CanvasState = {
+      nodes: [
+        { id: "a", type: "data_card", role: "evidence", title: "A", grounding: "tako", confidence: 1 },
+        { id: "b", type: "data_card", role: "evidence", title: "B", grounding: "tako", confidence: 1 },
+        { id: "c", type: "data_card", role: "evidence", title: "C", grounding: "tako", confidence: 1 },
+      ],
+      edges: [
+        { id: "a->b", from: "a", to: "b", kind: "feeds" },
+        { id: "b->c", from: "b", to: "c", kind: "feeds" },
+        { id: "c->a", from: "c", to: "a", kind: "feeds" },
+      ],
+    };
+    const out = validateGraph(cyclic);
+    expect(out.edges.map((e) => e.id)).toEqual(["a->b", "b->c"]);
+  });
+
   it("finalizeOps appends feeds edges for evidence added by ops", () => {
     const start: CanvasState = { nodes: [base.nodes[0]], edges: [] }; // consensus only
     const ops = [{ op: "add_node" as const, node: base.nodes[1] }]; // add evidence e-a

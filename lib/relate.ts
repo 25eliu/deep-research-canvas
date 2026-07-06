@@ -30,7 +30,29 @@ export function structuralEdges(state: CanvasState): CanvasEdge[] {
   return edges;
 }
 
-// Dedupe by id, drop edges to/from missing nodes, cap fan-in per target (anti-hairball).
+// Returns true if `target` is reachable from `source` by following directed
+// edges already present in `g` (i.e. adding source->target would close a cycle).
+function isReachable(g: Graph, source: string, target: string): boolean {
+  if (source === target) return true;
+  const visited = new Set<string>([source]);
+  const stack = [source];
+  while (stack.length > 0) {
+    const current = stack.pop()!;
+    for (const next of g.outboundNeighbors(current)) {
+      if (next === target) return true;
+      if (!visited.has(next)) {
+        visited.add(next);
+        stack.push(next);
+      }
+    }
+  }
+  return false;
+}
+
+// Dedupe by id, drop edges to/from missing nodes, drop self-loops, cap fan-in per
+// target (anti-hairball), and reject edges that would close a directed cycle.
+// graphology is the working graph: edges are added to it as they're accepted, and
+// both in-degree and cycle checks are queried from it.
 export function validateGraph(state: CanvasState, opts: { maxDegree?: number } = {}): CanvasState {
   const maxDegree = opts.maxDegree ?? 12;
   const g = new Graph({ multi: false, type: "directed", allowSelfLoops: false });
@@ -39,14 +61,14 @@ export function validateGraph(state: CanvasState, opts: { maxDegree?: number } =
 
   const seen = new Set<string>();
   const kept: CanvasEdge[] = [];
-  const inDegree: Record<string, number> = {};
   for (const e of state.edges) {
     if (seen.has(e.id)) continue;
     if (!nodeIds.has(e.from) || !nodeIds.has(e.to)) continue;
     if (e.from === e.to) continue;
-    if ((inDegree[e.to] ?? 0) >= maxDegree) continue;
+    if (g.inDegree(e.to) >= maxDegree) continue;
+    if (isReachable(g, e.to, e.from)) continue; // would close a cycle
     seen.add(e.id);
-    inDegree[e.to] = (inDegree[e.to] ?? 0) + 1;
+    g.addEdge(e.from, e.to);
     kept.push(e);
   }
   return { nodes: state.nodes, edges: kept };
