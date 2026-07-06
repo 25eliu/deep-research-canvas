@@ -1,6 +1,7 @@
 // Shared scene-graph contract. Backend emits ops; frontend applies them.
 
 import { z } from "zod";
+import { computeConsensusRows } from "./consensus";
 
 export const zGrounding = z.enum(["tako", "model", "web"]);
 export const zNodeType = z.enum([
@@ -141,9 +142,12 @@ export function applyOps(state: CanvasState, ops: CanvasOp[]): CanvasState {
         if (!edges.some((e) => e.id === op.edge.id)) edges.push(op.edge);
         break;
       }
-      case "recompute_consensus":
-        // Deterministic recompute is a frontend/app concern; left as a no-op hook.
+      case "recompute_consensus": {
+        const rows = computeConsensusRows({ nodes, edges }, op.target);
+        const i = nodes.findIndex((n) => n.id === op.target);
+        if (i >= 0) nodes[i] = { ...nodes[i], consensusRows: rows };
         break;
+      }
     }
   }
   return { nodes, edges };
