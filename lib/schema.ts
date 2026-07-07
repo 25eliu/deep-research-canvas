@@ -44,6 +44,18 @@ export const zConsensusRow = z.object({
   note: z.string().optional(),
 });
 
+// The composed final-answer "report": an ordered list of representation blocks
+// (prose / comparison table / chart / stat tiles) chosen by the final layer.
+// Attached to the synthesis node as `report`. Numbers are validated against real
+// gathered figures before this is emitted (see lib/agents/tako/compose.ts).
+export const zAnswerBlock = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("prose"), md: z.string() }),
+  z.object({ kind: z.literal("table"), columns: z.array(z.string()), rows: z.array(z.array(z.string())) }),
+  z.object({ kind: z.literal("chart"), title: z.string().optional(), chartSpec: zChartSpec }),
+  z.object({ kind: z.literal("tiles"), tiles: z.array(z.object({ label: z.string(), value: z.string(), delta: z.string().optional() })) }),
+]);
+export const zAnswerReport = z.object({ verdict: z.string(), blocks: z.array(zAnswerBlock) });
+
 export const zCanvasNode = z.object({
   id: z.string(),
   type: zNodeType,
@@ -59,6 +71,7 @@ export const zCanvasNode = z.object({
   metric: z.object({ value: z.string(), label: z.string(), delta: z.string().optional() }).optional(),
   criteria: z.object({ weights: z.record(z.number()) }).optional(),
   consensusRows: z.array(zConsensusRow).optional(),
+  report: zAnswerReport.optional(), // composed multi-block final answer (synthesis node)
   grounding: zGrounding,
   confidence: z.number(),
   position: z.object({ x: z.number(), y: z.number() }).nullable().optional(),
@@ -90,6 +103,8 @@ export type ChartSpec = z.infer<typeof zChartSpec>;
 export type TakoRef = z.infer<typeof zTakoRef>;
 export type NodeSource = z.infer<typeof zNodeSource>;
 export type ConsensusRow = z.infer<typeof zConsensusRow>;
+export type AnswerBlock = z.infer<typeof zAnswerBlock>;
+export type AnswerReport = z.infer<typeof zAnswerReport>;
 export type CanvasNode = z.infer<typeof zCanvasNode>;
 export type CanvasEdge = z.infer<typeof zCanvasEdge>;
 export type CanvasOp = z.infer<typeof zCanvasOp>;

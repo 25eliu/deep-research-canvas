@@ -1,89 +1,253 @@
 "use client";
+import { useEffect, useRef, useState } from "react";
 import type { CanvasNode } from "@/lib/schema";
+import { nodeWidth } from "@/lib/layout";
 import MiniChart from "./MiniChart";
+import TakoEmbed from "./TakoEmbed";
+import Markdown from "./Markdown";
+import AnswerReport from "./AnswerReport";
+import { IconChevron, IconExternal } from "./icons";
 
-export const NODE_W = 280;
+// Re-exported for callers that still import NODE_W (kept for layout back-compat).
+export const NODE_W = 300;
 
-function Badge({ node }: { node: CanvasNode }) {
-  const tako = node.grounding === "tako";
+function hostOf(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return "source";
+  }
+}
+
+// Real provenance for a baseline (gpt/claude) card: the live web sources its
+// figures were pulled from. sanitize guarantees each url was actually retrieved.
+function SourceCaption({ sources }: { sources: NonNullable<CanvasNode["sources"]> }) {
+  const shown = sources.slice(0, 3);
   return (
-    <span style={{
-      fontSize: 10, padding: "1px 6px", borderRadius: 6, marginLeft: 6,
-      background: tako ? "rgba(29,158,117,.15)" : "rgba(186,117,23,.15)",
-      color: tako ? "var(--tako)" : "var(--model)", border: `1px solid ${tako ? "var(--tako)" : "var(--model)"}`,
-    }}>
-      {tako ? "tako" : node.grounding} · {Math.round((node.confidence ?? 0) * 100)}%
-    </span>
+    <div className="caption">
+      <span className="src">source</span>
+      {shown.map((s, i) => (
+        <a key={i} href={s.url} target="_blank" rel="noreferrer"
+          title={s.title || s.url}
+          style={{ display: "inline-flex", alignItems: "center", gap: 3 }}>
+          {hostOf(s.url)} <IconExternal style={{ width: 12, height: 12 }} />
+        </a>
+      ))}
+      {sources.length > shown.length && <span>+{sources.length - shown.length} more</span>}
+    </div>
+  );
+}
+
+// A collapsible "see sources (N)" list of the websites an answer/sub-answer node used.
+// Web results are no longer their own canvas nodes — they're cited here per answer instead.
+function SeeSources({ sources }: { sources: NonNullable<CanvasNode["sources"]> }) {
+  const [open, setOpen] = useState(false);
+  const stop = (e: React.SyntheticEvent) => e.stopPropagation();
+  return (
+    <div className="see-sources">
+      <button
+        className="see-sources-toggle"
+        onPointerDown={stop}
+        onClick={(e) => { stop(e); setOpen((o) => !o); }}
+      >
+        {open ? "hide sources" : `see sources (${sources.length})`}
+      </button>
+      {open && (
+        <div className="sources-list">
+          {sources.map((s, i) => (
+            <a key={i} href={s.url} target="_blank" rel="noreferrer"
+              title={s.title || s.url} onPointerDown={stop}>
+              {hostOf(s.url)} <IconExternal style={{ width: 12, height: 12 }} />
+            </a>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 
 export default function NodeCard({
-  node, selected, onSelect, onDragStart,
+  node, selected, connected, collapsed, sources, onToggleCollapse, onMeasure,
 }: {
   node: CanvasNode;
   selected: boolean;
-  onSelect: (e: React.MouseEvent) => void;
-  onDragStart: (e: React.PointerEvent) => void;
+  connected?: boolean;
+  collapsed: boolean;
+  sources?: number; // incoming `feeds` edges — shown on the synthesis block
+  onToggleCollapse: (e: React.MouseEvent) => void;
+  onMeasure?: (id: string, height: number) => void;
 }) {
-  const base: React.CSSProperties = {
-    width: NODE_W, background: "var(--panel)", border: `1px solid ${selected ? "var(--accent)" : "var(--border)"}`,
-    borderRadius: 12, boxShadow: selected ? "0 0 0 2px var(--accent)" : "none", overflow: "hidden",
-  };
-  const header = (
-    <div onPointerDown={onDragStart} style={{ padding: "8px 10px", cursor: "grab", display: "flex", alignItems: "center", justifyContent: "space-between", borderBottom: "1px solid var(--border)" }}>
-      <div style={{ fontSize: 13, fontWeight: 500 }}>{node.title}</div>
-      {(node.type === "data_card" || node.type === "metric") && <Badge node={node} />}
-    </div>
-  );
+  const isSynth = node.type === "text" && node.role === "synthesis";
+  const isResearch = node.type === "text" && node.role === "research";
+  const isSource = node.type === "text" && node.role === "source";
+  const srcUrl = node.sources?.[0]?.url || node.tako?.webpageUrl;
+  const width = nodeWidth(node);
+  // The Tako search query that surfaced this finding card — shown so provenance is
+  // visible on the canvas. (Synthesis/research nodes render their own searches line.)
+  const foundVia = !isSynth && !isResearch && node.searches?.length
+    ? <div className="found-via" title="Tako search that returned this card">🔍 {node.searches[0]}</div>
+    : null;
+  // A Tako graph card carries the chart itself — its long text `summary` (the Tako
+  // description) is redundant noise, so we only show summaries on non-graph cards.
+  // The synthesis/research/source blocks render their own body, so exclude them.
+  const showSummary = node.summary && node.type !== "data_card" && !isSynth && !isResearch && !isSource;
+
+  // Report the real rendered height so the layout can pack cards tightly (Tako embeds
+  // resolve their aspect ratio asynchronously, so this fires again once it settles).
+  const rootRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = rootRef.current;
+    if (!el || !onMeasure) return;
+    const report = () => onMeasure(node.id, el.offsetHeight);
+    report();
+    const ro = new ResizeObserver(report);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [node.id, onMeasure, collapsed]);
 
   return (
-    <div style={base} onClick={onSelect}>
-      {header}
-      <div style={{ padding: 10 }}>
-        {node.type === "data_card" && node.tako?.embedUrl && (
-          <div>
-            <iframe src={node.tako.embedUrl} style={{ width: "100%", height: 200, border: 0, borderRadius: 8, background: "#fff" }} />
-            <div style={{ fontSize: 10, color: "var(--muted)", marginTop: 6 }}>
-              {node.tako.source}{node.tako.asOf ? ` · as of ${node.tako.asOf}` : ""} · <a href={node.tako.webpageUrl} target="_blank" style={{ color: "var(--tako)" }}>open in Tako</a>
-            </div>
-          </div>
-        )}
-        {node.type === "data_card" && !node.tako?.embedUrl && node.chartSpec && (
-          <div>
-            <MiniChart spec={node.chartSpec} />
-            <div style={{ fontSize: 10, color: "var(--model)", marginTop: 4 }}>model-drawn · no source · numbers may be stale</div>
-          </div>
-        )}
-        {node.type === "data_card" && !node.tako?.embedUrl && !node.chartSpec && (
-          <div style={{ fontSize: 12, color: "var(--muted)" }}>no structured data available</div>
-        )}
-        {node.summary && <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 6 }}>{node.summary}</div>}
-
-        {node.type === "metric" && node.metric && (
-          <div><div style={{ fontSize: 22, fontWeight: 500 }}>{node.metric.value}</div>
-            <div style={{ fontSize: 12, color: "var(--muted)" }}>{node.metric.label} {node.metric.delta}</div></div>
-        )}
-        {node.type === "criteria" && node.criteria && (
-          <div style={{ fontSize: 12 }}>
-            {Object.entries(node.criteria.weights).map(([k, v]) => (
-              <div key={k} style={{ display: "flex", justifyContent: "space-between", padding: "2px 0" }}>
-                <span>{k}</span><span className="mono" style={{ color: "var(--muted)" }}>{v}</span>
-              </div>
-            ))}
-          </div>
-        )}
-        {node.type === "consensus" && node.consensusRows && (
-          <div style={{ fontSize: 12 }}>
-            {node.consensusRows.sort((a, b) => a.rank - b.rank).map((r) => (
-              <div key={r.rank} style={{ display: "flex", gap: 8, padding: "3px 0", borderBottom: "1px solid var(--border)" }}>
-                <span style={{ color: "var(--accent)", width: 16 }}>{r.rank}</span>
-                <span style={{ flex: 1 }}>{r.entity}</span>
-                {r.score != null && <span className="mono" style={{ color: "var(--muted)" }}>{r.score}</span>}
-              </div>
-            ))}
-          </div>
-        )}
+    <div
+      ref={rootRef}
+      className={`node-card${selected ? " selected" : ""}${connected ? " connected" : ""}${collapsed ? " collapsed" : ""}`}
+      style={{ width }}
+    >
+      <div className="node-head">
+        <div className="node-title">{node.title}</div>
+        <button
+          className="chevron"
+          aria-label={collapsed ? "Expand" : "Collapse"}
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={(e) => { e.stopPropagation(); onToggleCollapse(e); }}
+        >
+          <IconChevron />
+        </button>
       </div>
+
+      {!collapsed && (
+        <div className="node-body">
+          {isSynth && (
+            <div className="synth">
+              <div className="synth-kicker">Answer</div>
+              {node.report
+                ? <AnswerReport report={node.report} />
+                : node.summary
+                  ? <div className="synth-body"><Markdown text={node.summary} /></div>
+                  : <div className="synth-body synth-pending">Synthesizing…</div>}
+              {node.searches?.length ? <div className="node-searches">🔍 {node.searches.join(" · ")}</div> : null}
+              {node.sources?.length ? <SeeSources sources={node.sources} /> : null}
+              {sources ? <div className="synth-sources">grounded in {sources} source{sources === 1 ? "" : "s"}</div> : null}
+            </div>
+          )}
+
+          {isResearch && (
+            <div className="synth research-synth">
+              <div className="synth-kicker">Sub-answer</div>
+              {node.summary
+                ? <div className="synth-body"><Markdown text={node.summary} compact /></div>
+                : <div className="synth-body synth-pending">Researching…</div>}
+              {node.searches?.length ? <div className="node-searches">🔍 {node.searches.join(" · ")}</div> : null}
+              {node.sources?.length ? <SeeSources sources={node.sources} /> : null}
+              {sources ? <div className="synth-sources">{sources} source{sources === 1 ? "" : "s"}</div> : null}
+            </div>
+          )}
+
+          {isSource && (
+            <div className="source-card">
+              {node.summary && <div className="source-snippet">{node.summary}</div>}
+              {srcUrl && (
+                <a className="source-host" href={srcUrl} target="_blank" rel="noreferrer">
+                  {/* Tako-grounded publisher node → its data page; a real web article → its domain. */}
+                  {node.grounding === "tako" ? "open in Tako" : hostOf(srcUrl)}
+                  <IconExternal style={{ width: 12, height: 12 }} />
+                </a>
+              )}
+              {foundVia}
+            </div>
+          )}
+
+          {node.type === "data_card" && node.tako?.embedUrl && (
+            <>
+              <TakoEmbed tako={node.tako} title={node.title} />
+              <div className="caption">
+                {/* source + as-of are already shown inside the embed footer — don't repeat them */}
+                {node.tako.webpageUrl && (
+                  <a href={node.tako.webpageUrl} target="_blank" rel="noreferrer"
+                    style={{ display: "inline-flex", alignItems: "center", gap: 3 }}>
+                    open in Tako <IconExternal style={{ width: 12, height: 12 }} />
+                  </a>
+                )}
+              </div>
+              {foundVia}
+            </>
+          )}
+
+          {node.type === "data_card" && !node.tako?.embedUrl && node.chartSpec && (
+            <>
+              <MiniChart spec={node.chartSpec} />
+              {node.sources && node.sources.length > 0
+                ? <SourceCaption sources={node.sources} />
+                : <div className="model-note">model-drawn · no source · numbers may be stale</div>}
+              {foundVia}
+            </>
+          )}
+
+          {node.type === "data_card" && !node.tako?.embedUrl && !node.chartSpec && (
+            <div className="empty-note">no structured data available</div>
+          )}
+
+          {node.type === "metric" && node.metric && (
+            <div>
+              <div className="metric-value">{node.metric.value}</div>
+              <div className="metric-label">
+                {node.metric.label}{" "}
+                {node.metric.delta && <span className="metric-delta">{node.metric.delta}</span>}
+              </div>
+              {node.sources && node.sources.length > 0 && <SourceCaption sources={node.sources} />}
+            </div>
+          )}
+
+          {node.type === "criteria" && node.criteria && (
+            <div>
+              {Object.entries(node.criteria.weights).map(([k, v]) => {
+                const maxW = Math.max(...Object.values(node.criteria!.weights), 1);
+                return (
+                  <div key={k} className="crit-row">
+                    <div className="crit-top"><span>{k}</span><span className="v">{v}</span></div>
+                    <div className="crit-bar"><span style={{ width: `${(v / maxW) * 100}%` }} /></div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {node.type === "consensus" && node.consensusRows && (
+            <div>
+              {[...node.consensusRows].sort((a, b) => a.rank - b.rank).map((r) => (
+                <div key={r.rank} className="cons-row">
+                  <span className={`rank r${r.rank}`}>{r.rank}</span>
+                  <span className="cons-entity">{r.entity}</span>
+                  {r.score != null && <span className="cons-score">{r.score}</span>}
+                </div>
+              ))}
+            </div>
+          )}
+
+          {showSummary && <div className="node-summary">{node.summary}</div>}
+
+          {node.type === "text" && node.role === "evidence" && node.tako && (
+            <div className="caption">
+              {node.tako.source && <span className="src">{node.tako.source}</span>}
+              {node.tako.asOf && <span>as of {node.tako.asOf}</span>}
+              {node.tako.webpageUrl && (
+                <a href={node.tako.webpageUrl} target="_blank" rel="noreferrer"
+                  style={{ display: "inline-flex", alignItems: "center", gap: 3 }}>
+                  open source <IconExternal style={{ width: 12, height: 12 }} />
+                </a>
+              )}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

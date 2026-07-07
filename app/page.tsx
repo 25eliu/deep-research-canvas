@@ -1,90 +1,132 @@
 "use client";
-import { useCallback, useMemo, useRef, useState } from "react";
-import type { CanvasNode, CanvasState } from "@/lib/schema";
-import { applyOps } from "@/lib/schema";
-import NodeCard, { NODE_W } from "@/components/NodeCard";
-
-type Provider = "gpt" | "claude" | "tako";
-const PROVIDERS: { id: Provider; label: string }[] = [
-  { id: "tako", label: "LLM + Tako" },
-  { id: "gpt", label: "GPT" },
-  { id: "claude", label: "Claude" },
-];
-const EDGE_COLOR: Record<string, string> = {
-  supports: "var(--supports)", contradicts: "var(--contradicts)", feeds: "var(--feeds)",
-  derived_from: "var(--accent)", sibling: "var(--muted)",
-};
-
-function heightGuess(n: CanvasNode): number {
-  if (n.type === "data_card") return n.tako ? 300 : 210;
-  if (n.type === "consensus") return 200;
-  if (n.type === "criteria") return 130;
-  if (n.type === "metric") return 110;
-  return 100;
-}
-
-function computeLayout(nodes: CanvasNode[]): Record<string, { x: number; y: number }> {
-  const pos: Record<string, { x: number; y: number }> = {};
-  const sections: string[] = [];
-  for (const n of nodes) if (n.section && !sections.includes(n.section)) sections.push(n.section);
-  const colW = NODE_W + 48, topY = 40;
-  const colY: Record<string, number> = {};
-  sections.forEach((s) => (colY[s] = topY));
-  for (const n of nodes) {
-    if (n.position) { pos[n.id] = n.position; continue; }
-    if (n.type === "consensus" || n.role === "consensus" || n.type === "criteria" || !n.section) continue;
-    const col = sections.indexOf(n.section);
-    pos[n.id] = { x: 40 + col * colW, y: colY[n.section] };
-    colY[n.section] += heightGuess(n) + 24;
-  }
-  const maxColY = Math.max(topY, ...Object.values(colY));
-  const critX = 40 + Math.max(sections.length, 1) * colW;
-  let critY = topY;
-  for (const n of nodes) if (!n.position && n.type === "criteria") { pos[n.id] = { x: critX, y: critY }; critY += 170; }
-  const centerX = 40 + (Math.max(sections.length - 1, 0) * colW) / 2;
-  for (const n of nodes) if (!n.position && (n.type === "consensus" || n.role === "consensus")) pos[n.id] = { x: centerX, y: maxColY + 40 };
-  let ny = maxColY + 280;
-  for (const n of nodes) if (!pos[n.id]) { pos[n.id] = { x: 40, y: ny }; ny += 140; }
-  return pos;
-}
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { applyOps, type CanvasOp } from "@/lib/schema";
+import { computeStructuredLayout } from "@/lib/layout";
+import {
+  type Session, type Provider, type Surface, type ChatMsg, type CanvasView,
+  newSession, loadSessions, saveSessions, hasStarted, uid,
+} from "@/lib/sessions";
+import type { LiveStep } from "@/lib/trace";
+import Sidebar from "@/components/Sidebar";
+import Landing from "@/components/Landing";
+import ChatPanel from "@/components/ChatPanel";
+import CanvasScene from "@/components/CanvasScene";
+import { ProviderSeg, TakoSwitch } from "@/components/ProviderControls";
+import { IconSidebar, IconPlus, IconMinus, IconFit } from "@/components/icons";
 
 export default function Page() {
-  const [provider, setProvider] = useState<Provider>("tako");
-  const [takoAnswer, setTakoAnswer] = useState(false);
-  const [state, setState] = useState<CanvasState>({ nodes: [], edges: [] });
+  // ---- session store (client-only persistence) ----
+  const [sessions, setSessions] = useState<Session[]>([]);
+  const [activeId, setActiveId] = useState("");
+  const [ready, setReady] = useState(false);
+
+  useEffect(() => {
+    const loaded = loadSessions();
+    if (loaded?.length) { setSessions(loaded); setActiveId(loaded[0].id); }
+    else { const s = newSession(); setSessions([s]); setActiveId(s.id); }
+    setReady(true);
+  }, []);
+  useEffect(() => { if (ready) saveSessions(sessions); }, [sessions, ready]);
+
+  const active = useMemo(() => sessions.find((s) => s.id === activeId), [sessions, activeId]);
+
+  const patchActive = useCallback((fn: (s: Session) => Session) => {
+    setSessions((list) => list.map((s) => (s.id === activeId ? fn(s) : s)));
+  }, [activeId]);
+
+  // ---- ephemeral UI state ----
   const [selection, setSelection] = useState<string[]>([]);
-  const [mainLog, setMainLog] = useState<{ role: string; text: string }[]>([]);
-  const [sideLog, setSideLog] = useState<{ role: string; text: string }[]>([]);
-  const [input, setInput] = useState("Research the best 5 semiconductor companies to invest in");
-  const [sideInput, setSideInput] = useState("");
+  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
+  const [movedIds, setMovedIds] = useState<Set<string>>(new Set());
+  const [draggingId, setDraggingId] = useState<string | null>(null);
+  const [heights, setHeights] = useState<Record<string, number>>({});
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
+  const [panelCollapsed, setPanelCollapsed] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [loadingStage, setLoadingStage] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const [loadingStage, setLoadingStage] = useState<string>("");
-  const [lastTrace, setLastTrace] = useState<any>(null);
-  const [view, setView] = useState({ x: 0, y: 0, scale: 1 });
 
-  const pos = useMemo(() => computeLayout(state.nodes), [state.nodes]);
-  const nodeById = useMemo(() => Object.fromEntries(state.nodes.map((n) => [n.id, n])), [state.nodes]);
+  const started = hasStarted(active);
+  // Entity-section header cards ("United States", "NVIDIA", …) are empty group labels
+  // that just take up space — hide them. Sources still group by their `section` key.
+  const visibleNodes = useMemo(
+    () => (active?.state.nodes ?? []).filter((n) => n.type !== "entity_section" && n.role !== "header"),
+    [active?.state.nodes],
+  );
+  const nodeById = useMemo(
+    () => Object.fromEntries(visibleNodes.map((n) => [n.id, n])),
+    [visibleNodes],
+  );
+  // Structured band layout gives every node a stable slot; user-dragged cards (and the
+  // one actively being dragged) override their slot with their manual position.
+  const layout = useMemo(
+    () => computeStructuredLayout(visibleNodes, heights, active?.state.edges ?? []),
+    [visibleNodes, heights, active?.state.edges],
+  );
+  const reportHeight = useCallback((id: string, h: number) => {
+    setHeights((prev) => (Math.abs((prev[id] ?? 0) - h) > 2 ? { ...prev, [id]: h } : prev));
+  }, []);
+  const pos = useMemo(() => {
+    const out = { ...layout.positions };
+    for (const n of visibleNodes)
+      if ((movedIds.has(n.id) || n.id === draggingId) && n.position) out[n.id] = n.position;
+    return out;
+  }, [layout, movedIds, draggingId, visibleNodes]);
 
-  const send = useCallback(async (surface: "main" | "side_chat", text: string) => {
-    if (!text.trim() || loading) return;
+  // ---- backend call (contract unchanged) ----
+  const send = useCallback(async (surface: Surface, text: string) => {
+    if (!text.trim() || loading || !active) return;
+    const snap = active;
+    const focusTitles = selection.map((id) => nodeById[id]?.title || id).filter(Boolean);
     setLoading(true); setError(null);
-    (surface === "main" ? setMainLog : setSideLog)((l) => [...l, { role: "user", text }]);
+
+    const userMsg: ChatMsg = { id: uid(), role: "user", text, surface, focus: surface === "side_chat" ? focusTitles : undefined };
+    patchActive((s) => ({
+      ...s,
+      title: s.messages.length === 0 ? text.slice(0, 48) : s.title,
+      messages: [...s.messages, userMsg],
+    }));
+
     try {
       const res = await fetch("/api/agent", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          canvasId: "default", message: text, surface,
-          canvasState: state,
+          canvasId: snap.id, message: text, surface,
+          canvasState: snap.state,
           selection: { nodeIds: selection, nodes: selection.map((id) => nodeById[id]).filter(Boolean) },
-          providerId: provider, takoAnswerEnabled: takoAnswer,
+          providerId: snap.provider, takoAnswerEnabled: snap.takoAnswer,
         }),
       });
       if (!res.body) throw new Error("no response stream");
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buf = "";
+      const synthBuf: Record<string, string> = {}; // accumulated answer text per canvas node
+      // One agent chat message per turn: it holds the live trace steps, then the
+      // authoritative trace + the final answer prose. Created lazily on first output.
+      let agentMsgId = "";
+      const ensureAgentMsg = (): string => {
+        if (!agentMsgId) {
+          const id = (agentMsgId = uid());
+          patchActive((s) => ({
+            ...s,
+            messages: [...s.messages, {
+              id, role: "agent", text: "", surface,
+              focus: surface === "side_chat" ? focusTitles : undefined,
+              steps: [],
+            }],
+          }));
+        }
+        return agentMsgId;
+      };
+      const pushStep = (step: LiveStep) => {
+        const id = ensureAgentMsg();
+        patchActive((s) => ({
+          ...s,
+          messages: s.messages.map((m) => (m.id === id ? { ...m, steps: [...(m.steps ?? []), step] } : m)),
+        }));
+      };
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -95,134 +137,403 @@ export default function Page() {
           if (!line.trim()) continue;
           const evt = JSON.parse(line);
           if (evt.type === "trace") {
-            setLoadingStage(evt.stage as string);
+            setLoadingStage(evt.stage as string); // lightweight status label only
+          } else if (evt.type === "reasoning") {
+            pushStep({ t: "reasoning", nodeId: evt.nodeId, depth: evt.depth, question: evt.question, kind: evt.kind, rationale: evt.rationale, entities: evt.entities, metrics: evt.metrics, subQuestions: evt.subQuestions });
+          } else if (evt.type === "tako_call") {
+            pushStep({ t: "tako", call: evt.call });
+          } else if (evt.type === "synthesis") {
+            pushStep({ t: "synth", nodeId: evt.nodeId, phase: evt.phase });
+          } else if (evt.type === "ops") {
+            // Incremental canvas ops — graphs/cards stream onto the board as
+            // each search resolves. add_node is idempotent (upsert by id).
+            const ops = evt.ops as CanvasOp[];
+            if (ops?.length) patchActive((s) => ({ ...s, state: applyOps(s.state, ops) }));
+          } else if (evt.type === "token") {
+            const text = String(evt.text ?? "");
+            if (!text) continue;
+            if (evt.nodeId) {
+              // Answer streams INTO a canvas node (the Synthesis block).
+              const id = evt.nodeId as string;
+              synthBuf[id] = (synthBuf[id] ?? "") + text; // update_node replaces, so accumulate
+              const summary = synthBuf[id];
+              patchActive((s) => ({ ...s, state: applyOps(s.state, [{ op: "update_node", id, patch: { summary } }]) }));
+            } else {
+              // Follow-up / baseline answers stream into the chat message.
+              const id = ensureAgentMsg();
+              patchActive((s) => ({ ...s, messages: s.messages.map((m) => (m.id === id ? { ...m, text: m.text + text } : m)) }));
+            }
           } else if (evt.type === "error") {
             setError(evt.error);
           } else if (evt.type === "result") {
-            if (evt.canvasOps?.length) setState((s) => applyOps(s, evt.canvasOps));
-            if (surface === "main") setMainLog((l) => [...l, { role: "agent", text: evt.narration || "" }]);
-            if (evt.sideReply) setSideLog((l) => [...l, { role: "agent", text: evt.sideReply }]);
-            setLastTrace(evt.trace);
+            const id = ensureAgentMsg();
+            patchActive((s) => {
+              const nextState = evt.canvasOps?.length ? applyOps(s.state, evt.canvasOps) : s.state;
+              // The answer: sideReply for a side-chat turn, else the narration or the
+              // root synthesis prose that streamed onto the canvas synth node.
+              const answer = surface === "side_chat"
+                ? (evt.sideReply ?? "")
+                : (evt.narration || synthBuf["synth"] || "");
+              const messages = s.messages.map((m) =>
+                m.id === id ? { ...m, text: answer || m.text, trace: evt.trace, steps: undefined } : m,
+              );
+              return { ...s, state: nextState, messages };
+            });
           }
         }
       }
-    } catch (e: any) { setError(String(e?.message || e)); }
-    finally { setLoading(false); setLoadingStage(""); }
-  }, [state, selection, nodeById, provider, takoAnswer, loading]);
+    } catch (e: any) {
+      setError(String(e?.message || e));
+    } finally {
+      setLoading(false); setLoadingStage("");
+    }
+  }, [active, selection, nodeById, loading, patchActive]);
 
-  // ---- panning + node dragging ----
-  const drag = useRef<{ id?: string; startX: number; startY: number; base: { x: number; y: number } } | null>(null);
+  const sendFromPanel = useCallback((text: string) => {
+    send(selection.length ? "side_chat" : "main", text);
+  }, [send, selection.length]);
+
+  // ---- pan / zoom / drag ----
+  // Two layers: a LIVE imperative layer (viewRef + direct style writes, zero React during a
+  // gesture) and the committed React layer (session.view) used only for persistence.
+  const MIN_SCALE = 0.1, MAX_SCALE = 4;
+  const stageRef = useRef<HTMLDivElement>(null);
+  const sceneRef = useRef<HTMLDivElement>(null);
+  const drag = useRef<{ id: string; startX: number; startY: number; base: { x: number; y: number }; el: HTMLElement } | null>(null);
   const pan = useRef<{ startX: number; startY: number; base: { x: number; y: number } } | null>(null);
+  const moved = useRef(false); // did the current gesture move past the click threshold?
+  const userAdjusted = useRef<Set<string>>(new Set()); // sessions where the user took control of the view
+  const didFit = useRef<Set<string>>(new Set()); // sessions already auto-framed once
+  const viewRef = useRef<CanvasView>(active?.view ?? { x: 0, y: 0, scale: 1 });
+  const anim = useRef<{ target: CanvasView; cur: CanvasView; raf: number } | null>(null);
+  const commitTimer = useRef<ReturnType<typeof setTimeout>>();
+  const DRAG_THRESHOLD = 4;
+
+  const setView = useCallback((fn: (v: CanvasView) => CanvasView) => {
+    patchActive((s) => ({ ...s, view: fn(s.view) }));
+  }, [patchActive]);
+
+  // Write the live transform straight to the DOM — the fast path that skips React entirely.
+  const applyTransform = useCallback((v: CanvasView) => {
+    const el = sceneRef.current;
+    if (el) el.style.transform = `translate(${v.x}px,${v.y}px) scale(${v.scale})`;
+  }, []);
+
+  // Commit the live view into session state (for persistence) — only on gesture end / debounced.
+  const commitView = useCallback(() => { setView(() => viewRef.current); }, [setView]);
+  const scheduleCommit = useCallback(() => {
+    clearTimeout(commitTimer.current);
+    commitTimer.current = setTimeout(commitView, 200);
+  }, [commitView]);
+
+  const cancelAnim = useCallback(() => {
+    if (anim.current) { cancelAnimationFrame(anim.current.raf); anim.current = null; }
+  }, []);
+
+  const prefersReducedMotion = () =>
+    typeof window !== "undefined" && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+
+  // Re-assert the imperative transform after every render, so an unrelated re-render
+  // (e.g. a node streaming in mid-pan) can never reset .scene's transform to a stale value.
+  useLayoutEffect(() => { applyTransform(viewRef.current); });
+
+  // Initialize / reset the live view only when the active session changes.
+  useEffect(() => {
+    cancelAnim();
+    drag.current = null; pan.current = null; setDraggingId(null);
+    viewRef.current = active?.view ?? { x: 0, y: 0, scale: 1 };
+    applyTransform(viewRef.current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeId]);
+
+  // Eased animation toward a target view — used ONLY by the +/- buttons and fit (no cursor
+  // anchor). Paints imperatively each frame; commits to state once when it settles.
+  const animateTo = useCallback((target: CanvasView) => {
+    if (prefersReducedMotion()) {
+      viewRef.current = target; applyTransform(target); setView(() => target); return;
+    }
+    if (anim.current) { anim.current.target = target; return; }
+    const step = () => {
+      const a = anim.current;
+      if (!a) return;
+      const c = a.cur, t = a.target, k = 0.2; // per-frame easing
+      c.x += (t.x - c.x) * k; c.y += (t.y - c.y) * k; c.scale += (t.scale - c.scale) * k;
+      const done = Math.abs(t.scale - c.scale) < 0.0008 && Math.abs(t.x - c.x) < 0.4 && Math.abs(t.y - c.y) < 0.4;
+      const next: CanvasView = done ? { ...t } : { x: c.x, y: c.y, scale: c.scale };
+      viewRef.current = next;
+      applyTransform(next);
+      if (done) { anim.current = null; setView(() => next); }
+      else a.raf = requestAnimationFrame(step);
+    };
+    anim.current = { target, cur: { ...viewRef.current }, raf: requestAnimationFrame(step) };
+  }, [applyTransform, setView]);
+
+  const clamp = (n: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, n));
+
+  // Zoom to an absolute scale while keeping (ax, ay) — stage-local pixels — fixed. Eased;
+  // used by the discrete zoom buttons (rapid wheel zoom is applied directly, see below).
+  const zoomToward = useCallback((scale: number, ax: number, ay: number) => {
+    const base = anim.current?.target ?? viewRef.current;
+    const s = clamp(scale, MIN_SCALE, MAX_SCALE);
+    const k = s / base.scale;
+    animateTo({ scale: s, x: ax - (ax - base.x) * k, y: ay - (ay - base.y) * k });
+  }, [animateTo]);
+
+  const markAdjusted = useCallback(() => {
+    if (activeId) userAdjusted.current.add(activeId);
+  }, [activeId]);
+
+  const zoomButton = useCallback((dir: 1 | -1) => {
+    const el = stageRef.current;
+    if (!el) return;
+    markAdjusted();
+    const base = anim.current?.target ?? viewRef.current;
+    zoomToward(base.scale * (dir > 0 ? 1.4 : 1 / 1.4), el.clientWidth / 2, el.clientHeight / 2);
+  }, [zoomToward, markAdjusted]);
+
+  // Frame the whole board within the canvas (fit button + one-time auto-frame).
+  const fitView = useCallback(() => {
+    const el = stageRef.current;
+    if (!el || el.clientWidth === 0) return;
+    const { minX, minY, maxX, maxY } = layout.bounds;
+    const cw = maxX - minX, ch = maxY - minY;
+    if (cw <= 0 || ch <= 0) return;
+    if (activeId) didFit.current.add(activeId); // fitting counts as "framed once"
+    const pad = 96;
+    const scale = clamp(Math.min((el.clientWidth - pad) / cw, (el.clientHeight - pad) / ch), MIN_SCALE, 1.2);
+    const x = (el.clientWidth - cw * scale) / 2 - minX * scale;
+    const y = Math.max(28, (el.clientHeight - ch * scale) / 2) - minY * scale;
+    animateTo({ x, y, scale });
+  }, [layout.bounds, animateTo, activeId]);
+
+  // Don't start a node drag from a link/button/textarea inside a card (let it work).
+  const isInteractive = (t: EventTarget | null) =>
+    t instanceof HTMLElement && !!t.closest("a,button,textarea,input,select");
 
   const onNodePointerDown = (id: string) => (e: React.PointerEvent) => {
-    e.stopPropagation();
-    (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
-    drag.current = { id, startX: e.clientX, startY: e.clientY, base: pos[id] || { x: 0, y: 0 } };
+    if (isInteractive(e.target)) return;
+    e.stopPropagation(); // the stage must not also start a pan
+    const el = e.currentTarget as HTMLElement;
+    el.setPointerCapture?.(e.pointerId);
+    moved.current = false;
+    setDraggingId(id);
+    drag.current = { id, startX: e.clientX, startY: e.clientY, base: pos[id] || { x: 0, y: 0 }, el };
   };
   const onCanvasPointerDown = (e: React.PointerEvent) => {
-    pan.current = { startX: e.clientX, startY: e.clientY, base: { x: view.x, y: view.y } };
+    // Don't start a pan (which captures the pointer) when pressing a UI control on the
+    // stage — capturing would swallow the control's click (e.g. the zoom buttons).
+    if (isInteractive(e.target)) return;
+    cancelAnim();
+    (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId); // keep events flowing off-viewport
+    moved.current = false;
+    pan.current = { startX: e.clientX, startY: e.clientY, base: { ...viewRef.current } };
   };
   const onPointerMove = (e: React.PointerEvent) => {
-    if (drag.current?.id) {
-      const dx = (e.clientX - drag.current.startX) / view.scale;
-      const dy = (e.clientY - drag.current.startY) / view.scale;
-      const id = drag.current.id, base = drag.current.base;
-      setState((s) => applyOps(s, [{ op: "move_node", id, position: { x: base.x + dx, y: base.y + dy } }]));
+    if (drag.current) {
+      const dx = e.clientX - drag.current.startX, dy = e.clientY - drag.current.startY;
+      if (Math.hypot(dx, dy) > DRAG_THRESHOLD) moved.current = true;
+      const s = viewRef.current.scale;
+      // Move the card imperatively (scene coords) — no setState, so no layout recompute.
+      drag.current.el.style.transform = `translate(${dx / s}px,${dy / s}px)`;
     } else if (pan.current) {
-      setView((v) => ({ ...v, x: pan.current!.base.x + (e.clientX - pan.current!.startX), y: pan.current!.base.y + (e.clientY - pan.current!.startY) }));
+      const dx = e.clientX - pan.current.startX, dy = e.clientY - pan.current.startY;
+      if (Math.hypot(dx, dy) > DRAG_THRESHOLD) { moved.current = true; markAdjusted(); }
+      viewRef.current = { scale: viewRef.current.scale, x: pan.current.base.x + dx, y: pan.current.base.y + dy };
+      applyTransform(viewRef.current);
     }
   };
-  const endInteraction = () => { drag.current = null; pan.current = null; };
-  const onWheel = (e: React.WheelEvent) => {
-    const s = Math.min(2, Math.max(0.4, view.scale * (e.deltaY > 0 ? 0.92 : 1.08)));
-    setView((v) => ({ ...v, scale: s }));
+  const endInteraction = (e?: React.PointerEvent) => {
+    if (drag.current) {
+      const { id, base, startX, startY, el } = drag.current;
+      if (moved.current && e) {
+        const s = viewRef.current.scale;
+        const np = { x: base.x + (e.clientX - startX) / s, y: base.y + (e.clientY - startY) / s };
+        // Reconcile the DOM to the committed position, then clear the imperative transform.
+        el.style.left = `${np.x}px`; el.style.top = `${np.y}px`; el.style.transform = "";
+        setMovedIds((m) => new Set(m).add(id)); // user-placed card becomes a fixed anchor
+        patchActive((st) => ({ ...st, state: applyOps(st.state, [{ op: "move_node", id, position: np }]) }));
+      } else {
+        el.style.transform = ""; // a click, not a drag
+      }
+    } else if (pan.current) {
+      if (moved.current) commitView(); // persist the panned view
+      else setSelection([]); // click on empty canvas clears highlight
+    }
+    drag.current = null; pan.current = null;
+    setDraggingId(null);
   };
+
+  // Wheel: cursor-anchored zoom applied DIRECTLY to the live view (no multi-frame ease, so
+  // the anchor never drifts). Shift = horizontal pan; ctrl/meta and trackpad pinch = zoom.
+  // Native non-passive listener so preventDefault stops the browser's own page zoom.
+  useEffect(() => {
+    const el = stageRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      cancelAnim();
+      markAdjusted();
+      const rect = el.getBoundingClientRect();
+      const px = e.clientX - rect.left, py = e.clientY - rect.top;
+      const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? el.clientHeight : 1; // lines/pages → px
+      const dx = e.deltaX * unit, dy = e.deltaY * unit;
+      const cur = viewRef.current;
+      if (e.shiftKey && !e.ctrlKey && !e.metaKey) {
+        viewRef.current = { ...cur, x: cur.x - (dx || dy) }; // horizontal pan
+      } else {
+        const s = clamp(cur.scale * clamp(Math.exp(-dy * 0.002), 0.8, 1.2), MIN_SCALE, MAX_SCALE);
+        const k = s / cur.scale;
+        viewRef.current = { scale: s, x: px - (px - cur.x) * k, y: py - (py - cur.y) * k };
+      }
+      applyTransform(viewRef.current);
+      scheduleCommit();
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, [applyTransform, scheduleCommit, markAdjusted, cancelAnim]);
+
+
+  // Auto-frame the board ONCE, shortly after it first gets nodes (let the first wave of
+  // card heights settle). Never re-frames on subsequent height churn; user pan/zoom opts out.
+  useEffect(() => {
+    if (!active || loading) return;
+    const id = active.id;
+    if (active.state.nodes.length === 0) { didFit.current.delete(id); userAdjusted.current.delete(id); return; }
+    if (didFit.current.has(id) || userAdjusted.current.has(id)) return;
+    const el = stageRef.current;
+    if (!el || el.clientWidth === 0) return;
+    const t = setTimeout(() => {
+      if (userAdjusted.current.has(id) || didFit.current.has(id)) return;
+      fitView();
+    }, 250);
+    return () => clearTimeout(t);
+  }, [active?.state.nodes.length, active?.id, loading, fitView]);
 
   const toggleSelect = (id: string) => (e: React.MouseEvent) => {
     e.stopPropagation();
+    if (moved.current) return; // was a drag, not a click
     setSelection((sel) => (sel.includes(id) ? sel.filter((x) => x !== id) : [...sel, id]));
   };
+  const toggleCollapse = (id: string) => () => {
+    setCollapsed((c) => ({ ...c, [id]: !c[id] }));
+  };
+
+  // ---- session actions ----
+  const newCanvas = () => {
+    const s = newSession();
+    setSessions((list) => [s, ...list]);
+    setActiveId(s.id); setSelection([]); setCollapsed({}); setMovedIds(new Set()); setError(null);
+  };
+  const selectSession = (id: string) => {
+    setActiveId(id); setSelection([]); setCollapsed({}); setMovedIds(new Set()); setError(null);
+  };
+  const deleteSession = (id: string) => {
+    // Compute from the current list (not inside the setState updater) so newSession()
+    // stays out of an impure updater — otherwise React's dev double-invoke mints two
+    // different fresh canvases and activeId ends up pointing at neither.
+    const next = sessions.filter((s) => s.id !== id);
+    const result = next.length ? next : [newSession()]; // deleting the last one leaves a fresh canvas
+    setSessions(result);
+    if (id === activeId) {
+      setActiveId(result[0].id); // move off the deleted (or fresh) canvas
+      setSelection([]); setCollapsed({}); setMovedIds(new Set()); setError(null);
+    }
+  };
+
+  if (!ready || !active) return <div className="loader">Canvas · Tako</div>;
+
+  const sidebarW = sidebarCollapsed ? 62 : 264;
+  const panelW = !started ? 0 : panelCollapsed ? 48 : 356;
+  const selectionTitles = selection.map((id) => nodeById[id]?.title || id).filter(Boolean);
 
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "1fr 340px", height: "100vh" }}>
-      {/* Canvas */}
-      <div style={{ position: "relative", overflow: "hidden", background: "radial-gradient(circle at 1px 1px, #1b1f2b 1px, transparent 0) 0 0/24px 24px" }}
-        onPointerDown={onCanvasPointerDown} onPointerMove={onPointerMove} onPointerUp={endInteraction} onPointerLeave={endInteraction} onWheel={onWheel}>
+    <div className="app-root">
+      <Sidebar
+        sessions={sessions}
+        activeId={activeId}
+        collapsed={sidebarCollapsed}
+        onToggle={() => setSidebarCollapsed((v) => !v)}
+        onNew={newCanvas}
+        onSelect={selectSession}
+        onDelete={deleteSession}
+      />
 
-        {/* Toolbar */}
-        <div style={{ position: "absolute", top: 12, left: 12, zIndex: 10, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-          {PROVIDERS.map((p) => (
-            <button key={p.id} onClick={() => setProvider(p.id)} style={{
-              padding: "6px 10px", borderRadius: 8, border: `1px solid ${provider === p.id ? "var(--accent)" : "var(--border)"}`,
-              background: provider === p.id ? "var(--accent)" : "var(--panel)", color: provider === p.id ? "#fff" : "var(--text)", fontSize: 12,
-            }}>{p.label}</button>
-          ))}
-          <label style={{ fontSize: 12, color: "var(--muted)", display: "flex", gap: 4, alignItems: "center" }}>
-            <input type="checkbox" checked={takoAnswer} onChange={(e) => setTakoAnswer(e.target.checked)} /> tako answer
-          </label>
-        </div>
+      <div
+        className="stage"
+        ref={stageRef}
+        style={{ left: sidebarW, right: panelW }}
+        onPointerDown={onCanvasPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={endInteraction}
+        onPointerCancel={endInteraction}
+      >
+        <CanvasScene
+          nodes={visibleNodes}
+          edges={active.state.edges}
+          pos={pos}
+          sceneRef={sceneRef}
+          draggingId={draggingId}
+          bands={layout.bands}
+          selection={selection}
+          collapsed={collapsed}
+          heights={heights}
+          onSelect={toggleSelect}
+          onDragStart={onNodePointerDown}
+          onToggleCollapse={toggleCollapse}
+          onMeasure={reportHeight}
+          nodeById={nodeById}
+        />
 
-        {/* Scene */}
-        <div style={{ position: "absolute", inset: 0, transform: `translate(${view.x}px,${view.y}px) scale(${view.scale})`, transformOrigin: "0 0" }}>
-          <svg style={{ position: "absolute", inset: 0, width: 4000, height: 4000, pointerEvents: "none", overflow: "visible" }}>
-            {state.edges.map((edge) => {
-              const a = pos[edge.from], b = pos[edge.to];
-              if (!a || !b) return null;
-              const x1 = a.x + NODE_W / 2, y1 = a.y + heightGuess(nodeById[edge.from]) - 20;
-              const x2 = b.x + NODE_W / 2, y2 = b.y + 10;
-              return <path key={edge.id} d={`M${x1},${y1} C${x1},${(y1 + y2) / 2} ${x2},${(y1 + y2) / 2} ${x2},${y2}`}
-                fill="none" stroke={EDGE_COLOR[edge.kind] || "var(--muted)"} strokeWidth={1.5} opacity={0.8} />;
-            })}
-          </svg>
-          {state.nodes.map((n) => (
-            <div key={n.id} style={{ position: "absolute", left: (pos[n.id]?.x ?? 0), top: (pos[n.id]?.y ?? 0) }}>
-              <NodeCard node={n} selected={selection.includes(n.id)} onSelect={toggleSelect(n.id)} onDragStart={onNodePointerDown(n.id)} />
-            </div>
-          ))}
-        </div>
-
-        {/* Main chat */}
-        <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, zIndex: 10, padding: 12, background: "linear-gradient(transparent, var(--bg) 40%)" }}>
-          {error && <div style={{ color: "var(--contradicts)", fontSize: 12, marginBottom: 6 }}>{error}</div>}
-          {loading && loadingStage && <div style={{ color: "var(--muted)", fontSize: 12, marginBottom: 6 }}>{loadingStage}</div>}
-          <div style={{ maxHeight: 120, overflowY: "auto", marginBottom: 8 }}>
-            {mainLog.slice(-4).map((m, i) => (
-              <div key={i} style={{ fontSize: 12, color: m.role === "user" ? "var(--text)" : "var(--muted)", margin: "2px 0" }}>
-                <b>{m.role === "user" ? "you" : "canvas"}:</b> {m.text}
-              </div>
-            ))}
+        {/* Zoom controls — stop pointerdown from starting a canvas pan (which would
+            capture the pointer and swallow these buttons' clicks). */}
+        {started && (
+          <div className="zoom-controls" onPointerDown={(e) => e.stopPropagation()}>
+            <button className="zoom-btn" onClick={() => zoomButton(1)} aria-label="Zoom in"><IconPlus /></button>
+            <button className="zoom-pct" onClick={fitView} title="Fit to view">{Math.round(active.view.scale * 100)}%</button>
+            <button className="zoom-btn" onClick={() => zoomButton(-1)} aria-label="Zoom out"><IconMinus /></button>
+            <button className="zoom-btn fit" onClick={fitView} aria-label="Fit to view"><IconFit /></button>
           </div>
-          <div style={{ display: "flex", gap: 8 }}>
-            <input value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && (send("main", input), setInput(""))}
-              placeholder="Ask the canvas…" style={{ flex: 1, padding: "10px 12px", borderRadius: 10, border: "1px solid var(--border)", background: "var(--panel)", color: "var(--text)" }} />
-            <button onClick={() => { send("main", input); setInput(""); }} disabled={loading}
-              style={{ padding: "10px 16px", borderRadius: 10, border: "1px solid var(--accent)", background: "var(--accent)", color: "#fff" }}>
-              {loading ? "…" : "Send"}
-            </button>
+        )}
+
+        {/* Top bar — appears once the canvas is in use */}
+        {started && (
+          <div className="topbar" onPointerDown={(e) => e.stopPropagation()}>
+            {sidebarCollapsed && (
+              <button className="icon-btn" onClick={() => setSidebarCollapsed(false)} aria-label="Show sidebar">
+                <IconSidebar />
+              </button>
+            )}
+            <span className="topbar-title">{active.title}</span>
+            <span className="spacer" />
+            <ProviderSeg provider={active.provider} onChange={(p: Provider) => patchActive((s) => ({ ...s, provider: p }))} />
+            <TakoSwitch checked={active.takoAnswer} onChange={(v) => patchActive((s) => ({ ...s, takoAnswer: v }))} />
           </div>
-        </div>
+        )}
       </div>
 
-      {/* Side panel: selection-scoped chat */}
-      <div style={{ borderLeft: "1px solid var(--border)", background: "var(--panel-2)", display: "flex", flexDirection: "column" }}>
-        <div style={{ padding: 12, borderBottom: "1px solid var(--border)", fontSize: 13, fontWeight: 500 }}>Selection chat</div>
-        <div style={{ padding: 12, borderBottom: "1px solid var(--border)", fontSize: 12, color: "var(--muted)" }}>
-          {selection.length ? selection.map((id) => nodeById[id]?.title || id).join(", ") : "Select nodes on the canvas to ask about them."}
-        </div>
-        <div style={{ flex: 1, overflowY: "auto", padding: 12 }}>
-          {sideLog.map((m, i) => (
-            <div key={i} style={{ fontSize: 13, margin: "6px 0", color: m.role === "user" ? "var(--text)" : "var(--muted)" }}>
-              <b>{m.role === "user" ? "you" : "assistant"}:</b> {m.text}
-            </div>
-          ))}
-        </div>
-        <div style={{ padding: 12, display: "flex", gap: 8, borderTop: "1px solid var(--border)" }}>
-          <input value={sideInput} onChange={(e) => setSideInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && (send("side_chat", sideInput), setSideInput(""))}
-            placeholder="Ask about the selection…" style={{ flex: 1, padding: "8px 10px", borderRadius: 8, border: "1px solid var(--border)", background: "var(--panel)", color: "var(--text)" }} />
-          <button onClick={() => { send("side_chat", sideInput); setSideInput(""); }} disabled={loading || !selection.length}
-            style={{ padding: "8px 12px", borderRadius: 8, border: "1px solid var(--border)", background: "var(--panel)" }}>Ask</button>
-        </div>
-      </div>
+      {/* Centered composer → slides into the side panel on first send */}
+      <Landing
+        hidden={started}
+        provider={active.provider}
+        setProvider={(p) => patchActive((s) => ({ ...s, provider: p }))}
+        takoAnswer={active.takoAnswer}
+        setTakoAnswer={(v) => patchActive((s) => ({ ...s, takoAnswer: v }))}
+        onSend={(t) => send("main", t)}
+        loading={loading}
+      />
+
+      <ChatPanel
+        away={!started}
+        collapsed={panelCollapsed}
+        onToggleCollapse={() => setPanelCollapsed((v) => !v)}
+        messages={active.messages}
+        selectionTitles={selectionTitles}
+        onClearSelection={() => setSelection([])}
+        onSend={sendFromPanel}
+        loading={loading}
+        loadingStage={loadingStage}
+        error={error}
+      />
     </div>
   );
 }

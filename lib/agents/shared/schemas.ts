@@ -1,6 +1,11 @@
 import { z } from "zod";
 import { zCanvasOps } from "../../schema";
 
+// The composed answer report lives in schema.ts (it's a canvas-node field); re-export
+// here so agent code has one import site for all agent schemas.
+export { zAnswerBlock, zAnswerReport } from "../../schema";
+export type { AnswerBlock, AnswerReport } from "../../schema";
+
 // The board-diff body every agent returns (before sanitize/relate/consensus).
 export const zAgentBody = z.object({
   canvasOps: zCanvasOps,
@@ -16,3 +21,51 @@ export const zBreakdown = z.object({
   subtypes: z.record(z.string()).optional(),
 });
 export const zQueries = z.object({ queries: z.array(z.string()) });
+
+// Web-source usefulness filter: the indices of the candidates worth keeping.
+export const zWebFilter = z.object({ useful: z.array(z.number()) });
+
+// Metric filter: from the metrics Tako's graph actually has for a resolved entity,
+// keep the ones that answer THIS (sub)question. Queries are then composed only from
+// confirmed entity×metric pairs — no ungrounded/overview/duplicate queries.
+export const zMetricFilter = z.object({ keep: z.array(z.string()) });
+
+// Structured result each branch/leaf returns (in addition to its prose node), so
+// the final layer can RECONCILE evidence rather than concatenate prose.
+export const zBranchResult = z.object({
+  claim: z.string(), // the branch's one-line answer to its sub-question
+  keyFigures: z.array(z.object({
+    label: z.string(),
+    value: z.string(),
+    entity: z.string().optional(),
+  })).default([]),
+  confidence: z.number().min(0).max(1),
+});
+export type BranchResult = z.infer<typeof zBranchResult>;
+
+
+// Recursive decompose step: the LLM decides whether a research question is atomic
+// (fetch data directly) or should split into distinct sub-questions (branch).
+export const zResearchPlan = z.object({
+  atomic: z.boolean(),
+  // 1-2 sentences: WHY this question is atomic or splits into these sub-questions.
+  // Surfaced to the user as the "reasoning" step for this research node.
+  rationale: z.string(),
+  // entities/metrics for THIS question, used when atomic (leaf fetch grounding).
+  entities: z.array(z.string()).default([]),
+  metrics: z.array(z.string()).default([]),
+  subQuestions: z.array(z.object({
+    question: z.string(),
+    rationale: z.string().optional(), // why this facet matters (optional per-sub reasoning)
+    entities: z.array(z.string()).default([]),
+    metrics: z.array(z.string()).default([]),
+  })).optional(),
+});
+
+// Stage 5 "structure": the LLM only names/summarizes sections + a board headline.
+// It cannot mint nodes — section summaries become update_node patches, the
+// headline seeds the streamed answer.
+export const zStructure = z.object({
+  headline: z.string(),
+  sections: z.array(z.object({ entity: z.string(), summary: z.string() })).optional(),
+});

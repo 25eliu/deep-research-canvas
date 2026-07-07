@@ -32,6 +32,49 @@ describe("sanitizeOps", () => {
     expect(n.grounding).toBe("tako");
   });
 
+  const webCard = (over: any = {}) => ({
+    op: "add_node",
+    node: { id: "w1", type: "data_card", title: "Rev", grounding: "web", confidence: 0.7, ...over },
+  });
+
+  it("keeps grounding=web when a baseline card cites a retrieved source URL", () => {
+    const out = sanitizeOps(
+      [webCard({ sources: [{ url: "https://ir.nvidia.com/q4", title: "NVIDIA IR" }] })],
+      { allowTako: false, validSourceUrls: new Set(["https://ir.nvidia.com/q4"]) },
+    );
+    const n = (out[0] as any).node;
+    expect(n.grounding).toBe("web");
+    expect(n.sources).toEqual([{ url: "https://ir.nvidia.com/q4", title: "NVIDIA IR" }]);
+    expect(n.tako).toBeUndefined();
+  });
+
+  it("drops a model-invented source URL and relabels the card model", () => {
+    const out = sanitizeOps(
+      [webCard({ sources: [{ url: "https://fake.example/made-up" }] })],
+      { allowTako: false, validSourceUrls: new Set(["https://ir.nvidia.com/q4"]) },
+    );
+    const n = (out[0] as any).node;
+    expect(n.grounding).toBe("model");
+    expect(n.sources).toBeUndefined();
+  });
+
+  it("relabels a web card with no sources as model (never shown as sourced)", () => {
+    const out = sanitizeOps([webCard()], { allowTako: false, validSourceUrls: new Set() });
+    const n = (out[0] as any).node;
+    expect(n.grounding).toBe("model");
+    expect(n.sources).toBeUndefined();
+  });
+
+  it("keeps only the valid subset when a card mixes real and invented sources", () => {
+    const out = sanitizeOps(
+      [webCard({ sources: [{ url: "https://real.example/a" }, { url: "https://fake.example/b" }] })],
+      { allowTako: false, validSourceUrls: new Set(["https://real.example/a"]) },
+    );
+    const n = (out[0] as any).node;
+    expect(n.grounding).toBe("web");
+    expect(n.sources).toEqual([{ url: "https://real.example/a" }]);
+  });
+
   it("returns [] for non-array input and skips malformed ops", () => {
     expect(sanitizeOps("nope" as any, { allowTako: false })).toEqual([]);
     expect(sanitizeOps([{ nope: true }], { allowTako: false })).toEqual([]);

@@ -6,11 +6,21 @@ import { applyOps } from "./schema";
 // same-metric across entities (sibling). Semantic supports/contradicts are LLM-authored.
 export function structuralEdges(state: CanvasState): CanvasEdge[] {
   const edges: CanvasEdge[] = [];
-  const consensus = state.nodes.find((n) => n.type === "consensus");
-  if (consensus) {
+  // A recursive research tree owns ALL its edges (the pipeline emits feeds/
+  // derived_from explicitly), so skip the single-hub fan-in when research nodes
+  // exist. Otherwise fan every finding into the one hub (synthesis or legacy
+  // consensus board) as before.
+  const hasResearchTree = state.nodes.some((n) => n.role === "research");
+  const hub = hasResearchTree ? undefined : state.nodes.find((n) => n.type === "consensus" || n.role === "synthesis");
+  if (hub) {
+    const synthHub = hub.role === "synthesis";
     for (const n of state.nodes) {
-      if (n.role === "evidence" || (n.type === "data_card" && n.section)) {
-        edges.push({ id: `feeds:${n.id}->${consensus.id}`, from: n.id, to: consensus.id, kind: "feeds" });
+      if (n.id === hub.id) continue;
+      const isSource = synthHub
+        ? (n.role === "evidence" || n.type === "data_card")
+        : (n.role === "evidence" || (n.type === "data_card" && n.section));
+      if (isSource) {
+        edges.push({ id: `feeds:${n.id}->${hub.id}`, from: n.id, to: hub.id, kind: "feeds" });
       }
     }
   }
@@ -59,6 +69,14 @@ export function validateGraph(state: CanvasState, opts: { maxDegree?: number } =
   const nodeIds = new Set(state.nodes.map((n) => n.id));
   for (const id of nodeIds) g.addNode(id);
 
+  // The synthesis/consensus hub is the intended fan-in target, so it is exempt
+  // from the anti-hairball in-degree cap (otherwise edges silently drop >12 findings).
+  const uncapped = new Set(
+    state.nodes
+      .filter((n) => n.role === "synthesis" || n.role === "research" || n.type === "consensus")
+      .map((n) => n.id),
+  );
+
   const seen = new Set<string>();
   const kept: CanvasEdge[] = [];
   for (const e of state.edges) {
@@ -66,7 +84,7 @@ export function validateGraph(state: CanvasState, opts: { maxDegree?: number } =
     if (!nodeIds.has(e.from) || !nodeIds.has(e.to)) continue;
     if (e.from === e.to) continue;
     if (g.hasEdge(e.from, e.to)) continue; // same pair already linked under a different edge id
-    if (g.inDegree(e.to) >= maxDegree) continue;
+    if (!uncapped.has(e.to) && g.inDegree(e.to) >= maxDegree) continue;
     if (isReachable(g, e.to, e.from)) continue; // would close a cycle
     seen.add(e.id);
     g.addEdge(e.from, e.to);

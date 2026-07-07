@@ -48,6 +48,59 @@ describe("relate", () => {
     expect(out.edges.map((e) => e.id)).toEqual(["a->b", "b->c"]);
   });
 
+  it("fans every finding into a synthesis hub, including ungrouped web cards", () => {
+    const board: CanvasState = {
+      edges: [],
+      nodes: [
+        { id: "synth", type: "text", role: "synthesis", title: "Answer", grounding: "tako", confidence: 0.9 },
+        { id: "d-a", type: "data_card", section: "A", title: "A", grounding: "tako", confidence: 1 }, // no evidence role
+        { id: "w", type: "text", role: "evidence", title: "web fact", grounding: "web", confidence: 0.7 }, // no section
+        { id: "d-web", type: "data_card", title: "answer chart", grounding: "tako", confidence: 1 }, // data_card, no section
+      ],
+    };
+    const feeds = structuralEdges(board).filter((e) => e.kind === "feeds" && e.to === "synth");
+    // all three findings connect — the section requirement is dropped for a synthesis hub
+    expect(feeds.map((e) => e.from).sort()).toEqual(["d-a", "d-web", "w"]);
+  });
+
+  it("does not cap fan-in into the synthesis hub past maxDegree", () => {
+    const nodes = [
+      { id: "synth", type: "text" as const, role: "synthesis" as const, title: "Answer", grounding: "tako" as const, confidence: 0.9 },
+      ...Array.from({ length: 15 }, (_, i) => ({
+        id: `c${i}`, type: "data_card" as const, section: "S", role: "evidence" as const,
+        title: `c${i}`, grounding: "tako" as const, confidence: 1,
+      })),
+    ];
+    const edges = nodes.slice(1).map((n) => ({ id: `${n.id}->synth`, from: n.id, to: "synth", kind: "feeds" as const }));
+    const out = validateGraph({ nodes, edges });
+    expect(out.edges.filter((e) => e.to === "synth").length).toBe(15); // all kept, not capped at 12
+  });
+
+  it("skips the single-hub fan-in when a research tree owns its edges", () => {
+    const tree: CanvasState = {
+      edges: [],
+      nodes: [
+        { id: "synth", type: "text", role: "synthesis", title: "A", grounding: "tako", confidence: 1 },
+        { id: "rq", type: "text", role: "research", section: "rq", title: "Q", grounding: "tako", confidence: 1 },
+        { id: "card", type: "data_card", section: "rq", title: "c", grounding: "tako", confidence: 1 },
+      ],
+    };
+    const feeds = structuralEdges(tree).filter((e) => e.kind === "feeds");
+    expect(feeds.length).toBe(0); // pipeline owns feeds/derived_from; no auto card→synth fan-in
+  });
+
+  it("does not cap fan-in into a research node past maxDegree", () => {
+    const nodes = [
+      { id: "rq", type: "text" as const, role: "research" as const, section: "rq", title: "Q", grounding: "tako" as const, confidence: 1 },
+      ...Array.from({ length: 15 }, (_, i) => ({
+        id: `c${i}`, type: "data_card" as const, section: "rq", title: `c${i}`, grounding: "tako" as const, confidence: 1,
+      })),
+    ];
+    const edges = nodes.slice(1).map((n) => ({ id: `${n.id}->rq`, from: n.id, to: "rq", kind: "feeds" as const }));
+    const out = validateGraph({ nodes, edges });
+    expect(out.edges.filter((e) => e.to === "rq").length).toBe(15); // all kept
+  });
+
   it("finalizeOps appends feeds edges for evidence added by ops", () => {
     const start: CanvasState = { nodes: [base.nodes[0]], edges: [] }; // consensus only
     const ops = [{ op: "add_node" as const, node: base.nodes[1] }]; // add evidence e-a
