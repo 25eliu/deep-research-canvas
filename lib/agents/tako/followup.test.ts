@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { AgentEvent } from "../shared/types";
+import type { AgentRequest } from "../../schema";
 
-// takoAnswer mock mirrors the real client: it invokes opts.onCall with call meta.
 vi.mock("../../tako", () => ({
   takoAnswer: vi.fn(async (q: string, opts: any = {}) => {
     const cards = [{ cardId: "amd", title: "AMD rev", embedUrl: "https://e/amd", webpageUrl: "https://w/amd", source: "Tako" }];
@@ -12,39 +12,61 @@ vi.mock("../../tako", () => ({
 
 vi.mock("../../llm", () => ({
   streamAnswer: vi.fn(async (opts: any) => {
-    const chunks = ["**AMD** ", "grew."];
-    for (const c of chunks) opts.onToken(c);
-    return chunks.join("");
+    opts.onToken("answer");
+    return "answer";
   }),
 }));
 
 import { runTakoFollowup } from "./followup";
+import { takoAnswer } from "../../tako";
 
-const req = {
-  canvasId: "c", message: "how did AMD do?", surface: "main" as const,
-  canvasState: { nodes: [], edges: [] }, providerId: "tako" as const, takoAnswerEnabled: true,
-  history: [],
-};
+const boardNode = { id: "nvda", type: "data_card" as const, title: "Nvidia revenue", summary: "grew 88%", grounding: "tako" as const, confidence: 0.9 };
+
+function req(over: Partial<AgentRequest> = {}): AgentRequest {
+  return {
+    canvasId: "c", message: "explain this", surface: "side_chat",
+    canvasState: { nodes: [boardNode], edges: [] },
+    selection: { nodeIds: ["nvda"], nodes: [boardNode] },
+    providerId: "tako", takoAnswerEnabled: true, history: [],
+    ...over,
+  };
+}
 
 beforeEach(() => vi.clearAllMocks());
 
-describe("runTakoFollowup — trace parity", () => {
-  it("emits tako_call + synthesis events and records calls on the trace", async () => {
+describe("runTakoFollowup — board-first", () => {
+  it("EXPLAIN with board content answers WITHOUT calling Tako", async () => {
+    const result = await runTakoFollowup(req(), "EXPLAIN", "", () => {});
+    expect(takoAnswer).not.toHaveBeenCalled();
+    expect(result.trace.groundedIn?.nodes.map((n) => n.id)).toEqual(["nvda"]);
+    expect(result.trace.groundedIn?.takoAnswerUsed).toBe(false);
+    expect(result.sideReply).toBe("answer");
+  });
+
+  it("AUGMENT calls Tako for new data even with board content", async () => {
+    const result = await runTakoFollowup(req({ surface: "main" }), "AUGMENT", "", () => {});
+    expect(takoAnswer).toHaveBeenCalledTimes(1);
+    expect(result.trace.groundedIn?.takoAnswerUsed).toBe(true);
+  });
+
+  it("EXPLAIN on an empty board falls back to Tako", async () => {
+    const result = await runTakoFollowup(
+      req({ canvasState: { nodes: [], edges: [] }, selection: undefined }),
+      "EXPLAIN", "", () => {},
+    );
+    expect(takoAnswer).toHaveBeenCalledTimes(1);
+    expect(result.trace.groundedIn?.takoAnswerUsed).toBe(true);
+  });
+
+  it("never calls Tako when takoAnswerEnabled is false", async () => {
+    await runTakoFollowup(req({ takoAnswerEnabled: false }), "AUGMENT", "", () => {});
+    expect(takoAnswer).not.toHaveBeenCalled();
+  });
+
+  it("emits tako_call events and records calls when Tako is used", async () => {
     const events: AgentEvent[] = [];
-    const result = await runTakoFollowup(req, (e) => events.push(e));
-
-    const takoCalls = events.filter((e) => e.type === "tako_call") as any[];
-    expect(takoCalls).toHaveLength(1);
-    expect(takoCalls[0].call.endpoint).toBe("/v1/answer");
-    expect(takoCalls[0].call.nodeId).toBe("followup");
-    expect(takoCalls[0].call.cards[0].id).toBe("amd");
-
-    const synth = events.filter((e) => e.type === "synthesis") as any[];
-    expect(synth.some((s) => s.phase === "start")).toBe(true);
-    expect(synth.some((s) => s.phase === "end")).toBe(true);
-
-    // authoritative trace carries the flat calls list (no research tree on this path)
-    expect(result.trace.calls?.length).toBe(1);
+    const result = await runTakoFollowup(req({ surface: "main" }), "AUGMENT", "", (e) => events.push(e));
+    expect((events.filter((e) => e.type === "tako_call") as any[]).length).toBe(1);
     expect(result.trace.calls?.[0].endpoint).toBe("/v1/answer");
   });
 });

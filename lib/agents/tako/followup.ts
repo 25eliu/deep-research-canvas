@@ -1,10 +1,11 @@
-import type { AgentRequest, CanvasOp } from "../../schema";
-import type { EmitFn, PipelineResult, Timings, TakoCallRecord } from "../shared/types";
+import type { AgentRequest, CanvasNode, CanvasOp } from "../../schema";
+import type { EmitFn, PipelineResult, Timings, TakoCallRecord, RouteAction } from "../shared/types";
 import { streamAnswer } from "../../llm";
 import { takoAnswer } from "../../tako";
 import { FindingLedger } from "./findings";
-import { ANSWER_SYSTEM } from "./prompts";
+import { FOLLOWUP_ANSWER_SYSTEM } from "./prompts";
 import { ctxBlock } from "../shared/ctx";
+import { retrieveNodes } from "../shared/retrieval";
 import { log } from "../../log";
 
 const OPENAI = "openai" as const;
@@ -13,22 +14,33 @@ function errorMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
-// Follow-up: Tako's web-grounded answer becomes the findings, which are attached
-// as nodes (on the main surface) and cited in a streamed answer. On a side-chat /
-// EXPLAIN turn the answer goes to sideReply and no board nodes are minted.
-export async function runTakoFollowup(req: AgentRequest, emit?: EmitFn): Promise<PipelineResult> {
+// Board-first follow-up: answer from the retrieved (selection-first) board nodes.
+// Only call Tako when the user asked for new/changed data (AUGMENT/REPLACE) or the
+// board has nothing to answer from — and never when takoAnswer is disabled. On a
+// side-chat / EXPLAIN turn the answer goes to sideReply and no board nodes are minted.
+export async function runTakoFollowup(
+  req: AgentRequest,
+  action: RouteAction,
+  historyText: string,
+  emit?: EmitFn,
+): Promise<PipelineResult> {
   const timings: Partial<Timings> = {};
   const notes: string[] = [];
-  const calls: TakoCallRecord[] = []; // Tako calls this follow-up issued (no research tree here)
+  const calls: TakoCallRecord[] = [];
   const ledger = new FindingLedger();
   const nodeOps: CanvasOp[] = [];
   const allowedNodeIds = new Set<string>();
   const toBoard = req.surface !== "side_chat";
   const answerEnabled = req.takoAnswerEnabled !== false;
 
+  const retrieved: CanvasNode[] = retrieveNodes(req.canvasState, req.selection, req.message);
+  const wantsNewData = action === "AUGMENT" || action === "REPLACE";
+  const boardCanAnswer = retrieved.length > 0;
+  const needsTako = answerEnabled && (wantsNewData || !boardCanAnswer);
+
   let answer = "";
   let t = Date.now();
-  if (answerEnabled) {
+  if (needsTako) {
     emit?.({ type: "trace", stage: "asking Tako (web enabled)" });
     try {
       const res = await takoAnswer(req.message, {
@@ -58,37 +70,38 @@ export async function runTakoFollowup(req: AgentRequest, emit?: EmitFn): Promise
     }
     emit?.({ type: "trace", stage: `Tako answered with ${ledger.size} findings` });
   } else {
-    notes.push("Tako Answer disabled — mapping from existing board context");
-    emit?.({ type: "trace", stage: "Tako Answer disabled — mapping from existing board context" });
+    notes.push(`Answering from ${retrieved.length} board node(s)`);
+    emit?.({ type: "trace", stage: `answering from ${retrieved.length} board node(s)` });
   }
   timings.search = Date.now() - t;
 
-  // Stream the cited answer. To the main surface it streams as tokens; to the
-  // side panel it is returned whole in sideReply (the client renders side replies
-  // from the final result, not the token stream).
+  const takoAnswerUsed = calls.length > 0;
+
+  // Compose the answer. Board content + history come from ctxBlock; a fresh Tako
+  // answer (when fetched) is appended as GROUNDED_ANSWER.
   emit?.({ type: "trace", stage: "writing answer" });
   t = Date.now();
-  const menu = ledger.list().map((f) => ({ title: f.title, source: f.source, summary: f.card.description }));
-  const prompt = `${ctxBlock(req)}\n\nGROUNDED_ANSWER: ${answer || "(none)"}\n\nFINDINGS: ${JSON.stringify(menu)}`;
+  const prompt = `${ctxBlock(req, historyText)}\n\nGROUNDED_ANSWER: ${answer || "(none — answer from board context)"}`;
 
   emit?.({
     type: "synthesis", phase: "start", nodeId: "followup", kind: "root",
-    inputs: { findingTitles: ledger.list().map((f) => f.title) },
+    inputs: { fromNodeIds: retrieved.map((n) => n.id), findingTitles: ledger.list().map((f) => f.title) },
   });
+
   let prose: string;
-  if (ledger.size > 0 || answer) {
+  if (retrieved.length > 0 || ledger.size > 0 || answer) {
     prose = await streamAnswer({
-      provider: OPENAI, system: ANSWER_SYSTEM, prompt, label: "followup",
+      provider: OPENAI, system: FOLLOWUP_ANSWER_SYSTEM, prompt, label: "followup",
       onToken: (chunk) => { if (toBoard) emit?.({ type: "token", text: chunk }); },
     });
   } else {
-    prose = "I couldn't find grounded data for this follow-up.";
+    prose = "I couldn't find anything on the board or in Tako to answer that.";
     if (toBoard) emit?.({ type: "token", text: prose });
   }
   emit?.({ type: "synthesis", phase: "end", nodeId: "followup", kind: "root" });
   timings.stream = Date.now() - t;
 
-  log("tako", "followup findings + timings", { findings: ledger.size, ...timings });
+  log("tako", "followup board-first", { retrieved: retrieved.length, findings: ledger.size, takoAnswerUsed, ...timings });
 
   return {
     nodeOps,
@@ -98,10 +111,15 @@ export async function runTakoFollowup(req: AgentRequest, emit?: EmitFn): Promise
     allowedNodeIds,
     trace: {
       queries: [req.message],
-      answerUsed: answerEnabled && !!answer,
+      answerUsed: takoAnswerUsed,
       cards: ledger.list().map((f) => ({ id: f.card.cardId, title: f.title, url: f.url || "" })),
       calls,
       notes,
+      groundedIn: {
+        nodes: retrieved.map((n) => ({ id: n.id, title: n.title })),
+        takoAnswerUsed,
+        cards: ledger.list().map((f) => ({ id: f.card.cardId, title: f.title, url: f.url || "" })),
+      },
       timings: { ...timings, total: 0 } as Timings,
     },
   };

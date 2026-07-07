@@ -22,6 +22,7 @@ Return { queries: string[] } — distinct, specific, <= 6.`;
 export const BROAD_COMPOSE_SYSTEM = `You write 1-2 Tako /v3/search queries for the BROAD/overview view of the user's overall question.
 Given the QUESTION and RESOLVED entities, write the query (or two) that best captures the headline/overview
 data for the whole question (e.g. the overall inflation rate, or the top-line comparison). Keep it high-level.
+Every query must pair a concrete subject (entity, country, region) with a measure — never a bare metric name alone.
 Return { queries: string[] } — 1 to 2 queries.`;
 
 export const SYNTH_SYSTEM = `You are the reasoning core of a spatial research canvas grounded in Tako structured data.
@@ -38,16 +39,19 @@ Return { atomic: boolean, rationale: string, entities: string[], metrics: string
 - rationale: 1-2 plain sentences explaining WHY you chose atomic vs. split, and what the plan is. This is shown to
   the user as your reasoning for this step — be specific and concrete (name the facets or the single comparison).
 - Each sub-question MAY carry its own short rationale (why that facet matters to the overall question).
-- STRONGLY PREFER atomic. Set atomic:true whenever the question can be answered by resolving entities and
-  fetching data/metrics DIRECTLY — even if it names several metrics across several entities. A single leaf
-  fetches multiple metrics for multiple entities in one pass, so a direct data comparison is NOT a reason to split.
+- ATOMIC means the question can be answered by resolving entities and fetching data/metrics DIRECTLY —
+  even if it names several metrics across several entities. A single leaf fetches multiple metrics for
+  multiple entities in one pass, so a direct data comparison is NOT a reason to split.
   (e.g. "Nvidia vs AMD data-center revenue" → atomic. "Compare Nvidia and AMD revenue growth and gross margins"
    → STILL atomic: it's one direct data comparison, just with two metrics — fetch them, don't branch.)
-- Decompose (atomic:false) ONLY when a good answer genuinely requires combining SEPARATE, self-standing
+- SPLIT (atomic:false) when a good answer genuinely requires combining SEPARATE, self-standing
   analyses that are DIFFERENT IDEAS — not merely different metrics of the same comparison. Test each candidate
   sub-question: would it be a meaningful research question on its own, investigating a DISTINCT angle? If the
-  parts are just adjacent data points, stay atomic. When unsure, stay atomic — over-decomposing floods the
-  canvas with redundant, adjacent sub-questions.
+  parts are just adjacent data points, keep them together — avoid redundant, adjacent sub-questions that
+  flood the canvas with the same surface.
+- HOW STRONGLY to lean toward atomic vs. split depends on the LEVEL of this question — the caller appends a
+  per-level instruction below. Follow it: the top-level question is the most likely to warrant splitting;
+  deeper sub-questions lean progressively harder toward atomic.
 - A question that names 2+ SEPARATE SUBJECTS is a valid split — each subject becomes its own sub-question,
   giving sharper, independent queries. (e.g. "How are energy and gasoline prices contributing to inflation?"
   → "energy prices' contribution to inflation" + "gasoline prices' contribution to inflation" — two distinct
@@ -81,6 +85,21 @@ Rules:
   vs "Revenue (Annual)", or a total vs a segment of it). Pick the single best-fitting one for the question.
 - Keep only what the question actually needs; prefer specific metrics over broad "overview"/"ratios" summaries.
 - Return the fewest that cover the question (often 1-2). If none fit, return an empty array.`;
+
+// Compose subject+metric queries from the series a graph METRIC search confirmed. A bare
+// metric name is never a valid query — it has no subject and Tako can't target it.
+export const STANDALONE_COMPOSE_SYSTEM = `You write Tako /v3/search queries that combine a SUBJECT with a graph-confirmed metric.
+You are given the SUB_QUESTION, KNOWN_SUBJECTS (entities resolved/decomposed for this sub-question), and
+GRAPH_METRICS (series the Tako graph actually has: name, aliases, description).
+Return { queries: string[] } — at most 3.
+Rules:
+- Use ONLY metrics that answer the SUB_QUESTION. GRAPH_METRICS contains fuzzy matches about unrelated
+  subjects — ignore them entirely.
+- EVERY query must name BOTH a concrete subject AND the measure — NEVER a bare metric name alone.
+  Company metric → "<company> <metric>" (e.g. "Nvidia Gross Margin"). Macro/country-level series → prefix the
+  geography the question implies (e.g. "US CPI Shelter", "US shelter inflation rate").
+- Prefer the metric's canonical name or a close alias so the search lands on the exact series.
+- Each query is a DISTINCT angle — no paraphrases of another query. If nothing fits, return [].`;
 
 // Turn a leaf/branch's evidence into a structured result the final layer reconciles.
 export const BRANCH_RESULT_SYSTEM = `You distill ONE research sub-question's evidence into a structured result.
@@ -180,3 +199,12 @@ You are given a TAKO_ANSWER (grounded prose) and ANSWER_CARDS (real Tako cards) 
 - If AUGMENT: add the answer cards as data_card nodes near the selection and connect them.
 - If REPLACE: swap the affected data_card(s) using the answer cards; leave untouched nodes and positions alone.
 Never invent a cardId or number. Return canvasOps, a <=2 sentence narration, and sideReply.`;
+
+// Board-first conversational follow-up answer. Reasons from BOARD CONTEXT first;
+// uses GROUNDED_ANSWER only when a Tako call was made this turn.
+export const FOLLOWUP_ANSWER_SYSTEM = `You are the Canvas Assistant answering a follow-up in a chat panel.
+Answer the user's MESSAGE using the BOARD CONTEXT (the nodes they can see) as your primary source, taking the
+CONVERSATION SO FAR into account for what "this"/"that"/"them" refer to.
+- Prefer the board's own data. If a GROUNDED_ANSWER is provided, it is fresh Tako data fetched this turn — weave it in.
+- Be concise and conversational: 1-3 short paragraphs, no headings. Light markdown only (**bold** a key figure, "- " bullets for 3+ items).
+- Use ONLY facts present in BOARD CONTEXT / GROUNDED_ANSWER. Never invent a number or source. Never mention missing data.`;
