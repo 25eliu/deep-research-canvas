@@ -132,7 +132,7 @@ export interface AgentRequest {
   selection?: { nodeIds: string[]; nodes: Partial<CanvasNode>[] };
   providerId: ProviderId;
   takoAnswerEnabled?: boolean;
-  history: ChatTurn[];
+  history?: ChatTurn[];
   historySummary?: string;
 }
 
