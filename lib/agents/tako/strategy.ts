@@ -8,7 +8,10 @@ import { ctxBlock } from "../shared/ctx";
 import { zQueries, zMetricFilter } from "../shared/schemas";
 import { graphSearch, graphRelated } from "./graph";
 import { diversifyQueries } from "./queries";
-import { COMPOSE_SYSTEM, BROAD_COMPOSE_SYSTEM, METRIC_FILTER_SYSTEM } from "./prompts";
+import {
+  COMPOSE_SYSTEM, BROAD_COMPOSE_SYSTEM, METRIC_FILTER_SYSTEM,
+  SEARCH_LEAF_COMPOSE_SYSTEM, SEARCH_BROAD_COMPOSE_SYSTEM,
+} from "./prompts";
 
 const OPENAI = "openai" as const;
 export const LEAF_QUERY_CAP = 3; // 1-3 independent searches per sub-question
@@ -154,5 +157,39 @@ export const graphStrategy: QueryStrategy = {
       ctx.notes.push(`broad compose failed — ${errorMessage(e)}`);
     }
     return { queries, graph };
+  },
+};
+
+// searchStrategy: no graph. The LLM composes queries straight from the sub-question,
+// then we dedup + diversify + cap exactly as the grounded path does, so downstream
+// (runSearches, synthesis, compose) sees the same shape. graph is always [].
+export const searchStrategy: QueryStrategy = {
+  async leafQueries(ctx, question) {
+    try {
+      const composed = await generateStructured({
+        provider: OPENAI, system: SEARCH_LEAF_COMPOSE_SYSTEM,
+        prompt: `${ctxBlock(ctx.req)}\n\nSUB_QUESTION: ${question}`,
+        schema: zQueries, label: "search-leaf-compose",
+      });
+      const dq = Array.from(new Set(composed.queries.map((q) => q.trim()))).filter(Boolean);
+      return { queries: diversifyQueries(dq, { threshold: 0.6, max: LEAF_QUERY_CAP }), graph: [] };
+    } catch (e: unknown) {
+      ctx.notes.push(`search-leaf compose failed — ${errorMessage(e)}`);
+      return { queries: [], graph: [] };
+    }
+  },
+  async broadQueries(ctx, question) {
+    try {
+      const composed = await generateStructured({
+        provider: OPENAI, system: SEARCH_BROAD_COMPOSE_SYSTEM,
+        prompt: `${ctxBlock(ctx.req)}\n\nQUESTION: ${question}`,
+        schema: zQueries, label: "search-broad-compose",
+      });
+      const dq = Array.from(new Set(composed.queries.map((q) => q.trim()))).filter(Boolean);
+      return { queries: dq.slice(0, 2), graph: [] };
+    } catch (e: unknown) {
+      ctx.notes.push(`search-broad compose failed — ${errorMessage(e)}`);
+      return { queries: [], graph: [] };
+    }
   },
 };

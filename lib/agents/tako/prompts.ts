@@ -162,6 +162,17 @@ Actively DRAW ON WEB_SOURCES for qualitative context, recent developments, and d
 capture — weave their facts into the prose and verdict. When a claim leans on a web source, name the publisher
 inline (e.g. "per Reuters"). No citation markers.`;
 
+export const SEARCH_LEAF_COMPOSE_SYSTEM = `You write Tako /v3/search queries that answer ONE specific sub-question, working from the question text ALONE (no knowledge graph).
+- Output 1-3 queries. Each must be a DISTINCT angle on the sub-question (a different metric, facet, or entity) — never near-duplicates.
+- Write each as a short search-style noun phrase a data search engine would match: entity + measure + qualifier (e.g. "US gasoline prices 2024", "Nvidia data center revenue"). NOT a full sentence, no question marks.
+- If the sub-question is a single simple ask, ONE query is correct — do not pad to three.
+Return { queries }.`;
+
+export const SEARCH_BROAD_COMPOSE_SYSTEM = `You write 1-2 Tako /v3/search queries for the BROAD/overview view of the user's overall question, working from the question text ALONE (no knowledge graph).
+- 1-2 queries max, each capturing a headline/overview measure for the whole question.
+- Short search-style noun phrases, not sentences; no near-duplicates.
+Return { queries }.`;
+
 export const FOLLOWUP_SYSTEM = `You answer a follow-up on a spatial research canvas grounded in Tako.
 You are given a TAKO_ANSWER (grounded prose) and ANSWER_CARDS (real Tako cards) fetched for this question.
 - If the surface is side_chat or the action is EXPLAIN: put the answer in sideReply; optionally attach ONE
