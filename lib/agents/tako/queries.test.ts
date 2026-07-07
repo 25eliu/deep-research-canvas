@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { diversifyQueries } from "./queries";
-import { fallbackQueries } from "./research";
+import { fallbackQueries } from "./strategy";
 
 describe("diversifyQueries", () => {
   it("keeps distinct per-entity queries", () => {

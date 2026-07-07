@@ -8,15 +8,14 @@ import type { AgentRequest, CanvasOp, CanvasNode } from "../../schema";
 import type { EmitFn, TraceTreeNode, TakoCallRecord } from "../shared/types";
 import { generateStructured, streamAnswer } from "../../llm";
 import { ctxBlock } from "../shared/ctx";
-import { zResearchPlan, zQueries, zWebFilter, zMetricFilter } from "../shared/schemas";
-import { graphSearch, graphRelated } from "./graph";
+import { zResearchPlan, zWebFilter } from "../shared/schemas";
 import { takoSearch, takoContents } from "../../tako";
 import { FindingLedger, type Finding } from "./findings";
-import { diversifyQueries } from "./queries";
 import {
-  DECOMPOSE_SYSTEM, COMPOSE_SYSTEM, BROAD_COMPOSE_SYSTEM, WEB_FILTER_SYSTEM, METRIC_FILTER_SYSTEM,
+  DECOMPOSE_SYSTEM, WEB_FILTER_SYSTEM,
   LEAF_SYNTH_SYSTEM, BRANCH_SYNTH_SYSTEM,
 } from "./prompts";
+import { graphStrategy, type QueryStrategy } from "./strategy";
 
 const OPENAI = "openai" as const;
 
@@ -29,7 +28,6 @@ export const SYNTH_ID = "synth";
 const MAX_DEPTH = 2;
 const MAX_CHILDREN = 3; // hard cap of 3 sub-questions at EVERY level
 const TOTAL_RESEARCH_CAP = 12; // non-root research nodes (safety bound on a deep tree)
-const LEAF_QUERY_CAP = 3; // 1-3 independent searches per sub-question (no similar/general spam)
 const CONTENTS_CAP = 12; // max tako-contents (CSV/text) fetches per turn — bounds cost + latency
 const CSV_EXCERPT = 1800; // chars of a card's CSV series handed to the synthesis LLM
 
@@ -169,6 +167,7 @@ export interface ResearchCtx {
   ledger: FindingLedger;
   push: (ops: CanvasOp[]) => void;
   emit?: EmitFn;
+  strategy: QueryStrategy;
   budget: { researchNodes: number; readonly maxNodes: number };
   usedIds: Set<string>;
   notes: string[];
@@ -190,9 +189,12 @@ export interface ResearchCtx {
   timings: { graph: number; search: number; decompose: number; stream: number };
 }
 
-export function newResearchCtx(req: AgentRequest, ledger: FindingLedger, push: ResearchCtx["push"], emit?: EmitFn): ResearchCtx {
+export function newResearchCtx(
+  req: AgentRequest, ledger: FindingLedger, push: ResearchCtx["push"],
+  emit?: EmitFn, strategy: QueryStrategy = graphStrategy,
+): ResearchCtx {
   return {
-    req, ledger, push, emit,
+    req, ledger, push, emit, strategy,
     budget: { researchNodes: 0, maxNodes: TOTAL_RESEARCH_CAP },
     usedIds: new Set([SYNTH_ID]),
     notes: [], tree: [], resolved: [], related: [], queries: [],
@@ -334,10 +336,7 @@ async function leaf(
   question: string, depth: number, nodeId: string, root: boolean, ctx: ResearchCtx,
   entities: string[], metrics: string[], rationale?: string,
 ): Promise<ResearchResult> {
-  const resolved = await resolveGraph(ctx, entities, metrics, question);
-  // What the graph actually resolved for this node (shown per answer query in the trace).
-  const graph = resolved.map((r) => ({ entity: r.entity, related: r.related.map((m) => m.name) }));
-  const queries = await groundedQueries(ctx, question, resolved, entities, metrics);
+  const { queries, graph } = await ctx.strategy.leafQueries(ctx, question, entities, metrics);
   ctx.queries.push(...queries);
 
   // The empty research node must exist before any of its finding/token ops.
@@ -420,22 +419,7 @@ function firstSentence(prose: string): string {
 async function broadFetch(
   question: string, nodeId: string, ctx: ResearchCtx, entities: string[], metrics: string[],
 ): Promise<{ findings: Finding[]; queries: string[]; calls: TakoCallRecord[]; graph: { entity: string; related: string[] }[] }> {
-  const resolved = await resolveGraph(ctx, entities, metrics, question);
-  const graph = resolved.map((r) => ({ entity: r.entity, related: r.related.map((m) => m.name) }));
-  const resolvedInfo = resolved
-    .map((r) => `${r.entity}: ${r.related.slice(0, 5).map((m) => `${m.name} [${m.aliases.join(", ")}]`).join("; ")}`)
-    .join("\n");
-  let queries: string[] = [];
-  try {
-    const composed = await generateStructured({
-      provider: OPENAI, system: BROAD_COMPOSE_SYSTEM,
-      prompt: `${ctxBlock(ctx.req)}\n\nQUESTION: ${question}\n\nRESOLVED:\n${resolvedInfo || "(none)"}`,
-      schema: zQueries, label: "broad-compose",
-    });
-    queries = Array.from(new Set(composed.queries.map((q) => q.trim()))).filter(Boolean).slice(0, 2);
-  } catch (e: unknown) {
-    ctx.notes.push(`broad compose failed — ${errorMessage(e)}`);
-  }
+  const { queries, graph } = await ctx.strategy.broadQueries(ctx, question, entities, metrics);
   ctx.queries.push(...queries);
 
   // Broad chart cards feed the synth; broad web sources are filtered into ctx.webSources.
@@ -552,129 +536,4 @@ async function runSearches(
   }
   ctx.sourcesByNode.set(nodeId, nodeSources);
   return { dataFindings, webSources: useful, calls };
-}
-
-interface ResolvedEntity { entity: string; node: string; related: { name: string; aliases: string[]; description?: string }[] }
-
-// Resolve each entity to its Tako graph node and pull the metrics Tako ACTUALLY has
-// for it (graphRelated). Records provenance in ctx.resolved/ctx.related.
-async function resolveGraph(ctx: ResearchCtx, entities: string[], metrics: string[], topic: string): Promise<ResolvedEntity[]> {
-  const t = Date.now();
-  const out: ResolvedEntity[] = [];
-  await Promise.all(
-    entities.slice(0, 3).map(async (name) => {
-      try {
-        const nodes = await graphSearch(name, { types: "entity" });
-        const node = nodes[0];
-        if (!node) { ctx.notes.push(`No graph node for "${name}"`); return; }
-        ctx.resolved.push({ query: name, node: node.name });
-        const q = metrics[0] || topic || name;
-        const items = await graphRelated(node.id, { relationType: "metric", q });
-        ctx.related.push({ node: node.name, items: items.map((i) => i.name) });
-        out.push({ entity: node.name, node: node.id, related: items.map((i) => ({ name: i.name, aliases: i.aliases || [], description: i.description })) });
-      } catch (e: unknown) {
-        ctx.notes.push(`graph lookup failed for "${name}" — ${errorMessage(e)}`);
-      }
-    }),
-  );
-  ctx.timings.graph = Math.max(ctx.timings.graph, Date.now() - t);
-  return out;
-}
-
-const includesCi = (a: string, b: string) => a.toLowerCase().includes(b.toLowerCase());
-
-// Collapse repeated words (case-insensitive, first occurrence wins) so a composed query
-// like "US gasoline prices gasoline price level" doesn't stutter into "...gasoline...gasoline...".
-function dedupeWords(s: string): string {
-  const seen = new Set<string>();
-  return s
-    .split(/\s+/)
-    .filter((w) => { const k = w.toLowerCase(); if (!k || seen.has(k)) return false; seen.add(k); return true; })
-    .join(" ");
-}
-
-// Deterministic fallback query composer (used when the graph confirms no metrics). Pairs each
-// SUBJECT entity with each metric, but guards the malformed queries a raw cross-product makes:
-//   - Subjects exclude any entity already named inside a metric — a context/target noun like
-//     "inflation" that leaked into `entities` (and appears in "contribution to inflation") is
-//     dropped, so we never emit "inflation contribution to inflation".
-//   - Degenerate pairs (entity ⊆ metric or metric ⊆ entity) are skipped.
-//   - Duplicate words are collapsed; exact duplicates removed; capped to LEAF_QUERY_CAP.
-// Metric-outer ordering gives every subject the primary metric before the cap is spent, so
-// multi-entity coverage survives. NOT jaccard-diversified — per-subject queries differ only by
-// the subject name and must not collapse into one.
-export function fallbackQueries(entities: string[], metrics: string[]): string[] {
-  const ents = entities.map((e) => e.trim()).filter(Boolean);
-  const mets = metrics.map((m) => m.trim()).filter(Boolean);
-  const subjects = ents.filter((e) => !mets.some((m) => includesCi(m, e)));
-  const use = subjects.length ? subjects : ents; // if every entity got filtered, keep them all
-  const out: string[] = [];
-  const seen = new Set<string>();
-  for (const m of mets) {
-    for (const e of use) {
-      if (includesCi(m, e) || includesCi(e, m)) continue; // degenerate pair
-      const q = dedupeWords(`${e} ${m}`);
-      const k = q.toLowerCase();
-      if (q && !seen.has(k)) { seen.add(k); out.push(q); }
-    }
-  }
-  return out.slice(0, LEAF_QUERY_CAP);
-}
-
-// Compose grounded queries: for each resolved entity, an LLM FILTER picks the
-// related metrics that answer THIS question, and we emit exactly one query per
-// confirmed entity×metric pair. No overview/ungrounded/duplicate queries. Falls
-// back to a free-form compose only when nothing resolved from the graph.
-async function groundedQueries(
-  ctx: ResearchCtx, question: string, resolved: ResolvedEntity[],
-  entities: string[] = [], metrics: string[] = [],
-): Promise<string[]> {
-  const queries: string[] = [];
-  for (const r of resolved) {
-    if (r.related.length === 0) { ctx.notes.push(`Tako has no related metrics for "${r.entity}"`); continue; }
-    let keep: string[] = [];
-    try {
-      const res = await generateStructured({
-        provider: OPENAI, system: METRIC_FILTER_SYSTEM,
-        // Pass name + aliases + description so the filter understands each metric and
-        // picks DISTINCT concepts (not near-duplicate variants of one measure).
-        prompt: `${ctxBlock(ctx.req)}\n\nQUESTION: ${question}\n\nENTITY: ${r.entity}\n\nRELATED_METRICS: ${JSON.stringify(r.related.map((m) => ({ name: m.name, aliases: m.aliases, description: m.description })))}`,
-        schema: zMetricFilter, label: "metric-filter",
-      });
-      const avail = new Set(r.related.map((m) => m.name.toLowerCase()));
-      keep = res.keep.filter((m) => avail.has(m.toLowerCase())).slice(0, LEAF_QUERY_CAP);
-    } catch (e: unknown) {
-      ctx.notes.push(`metric filter failed for "${r.entity}" — ${errorMessage(e)}`);
-    }
-    if (keep.length === 0) { ctx.notes.push(`No answer-relevant Tako metric for "${r.entity}"`); continue; }
-    for (const m of keep) queries.push(`${r.entity} ${m}`); // one grounded query per confirmed pair
-  }
-  // Backstop: drop near-duplicate queries the filter may have let through, and hard-cap
-  // to 1-3 independent searches per sub-question. threshold 0.6 = fairly aggressive.
-  if (queries.length) {
-    return diversifyQueries(Array.from(new Set(queries)), { threshold: 0.6, max: LEAF_QUERY_CAP });
-  }
-  // Disciplined fallback: the graph confirmed no metrics, but decomposition already assigned
-  // this leaf its entities + metric(s). fallbackQueries composes clean, subject-grounded
-  // queries (dropping context nouns, degenerate pairs, and word stutter) — so we get
-  // "gasoline prices contribution to inflation", never "inflation contribution to inflation".
-  if (entities.length && metrics.length) {
-    const fb = fallbackQueries(entities, metrics);
-    if (fb.length) return fb;
-  }
-
-  // Last resort: no entities/metrics either → compose from the question directly,
-  // still diversified and capped to 1-3.
-  try {
-    const composed = await generateStructured({
-      provider: OPENAI, system: COMPOSE_SYSTEM,
-      prompt: `${ctxBlock(ctx.req)}\n\nSUB_QUESTION: ${question}\n\nRESOLVED:\n(none — compose from the question directly)`,
-      schema: zQueries, label: "compose",
-    });
-    const dq = Array.from(new Set(composed.queries.map((q) => q.trim()))).filter(Boolean);
-    return diversifyQueries(dq, { threshold: 0.6, max: LEAF_QUERY_CAP });
-  } catch (e: unknown) {
-    ctx.notes.push(`compose fallback failed — ${errorMessage(e)}`);
-    return [];
-  }
 }
