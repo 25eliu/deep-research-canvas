@@ -29,6 +29,14 @@ export const zTakoRef = z.object({
   asOf: z.string().optional(),
 });
 
+// A citation attached to a data-bearing node. For baseline (gpt/claude) cards these
+// are the live web-search results the figures came from; sanitize guarantees every
+// url here was actually retrieved this turn (no model-invented URLs).
+export const zNodeSource = z.object({
+  url: z.string(),
+  title: z.string().optional(),
+});
+
 export const zConsensusRow = z.object({
   rank: z.number(),
   entity: z.string(),
@@ -40,11 +48,13 @@ export const zCanvasNode = z.object({
   id: z.string(),
   type: zNodeType,
   section: z.string().optional(),
-  role: z.enum(["header", "evidence", "criteria", "consensus", "note"]).optional(),
+  role: z.enum(["header", "evidence", "criteria", "consensus", "note", "synthesis", "research", "source"]).optional(),
   rank: z.number().nullable().optional(),
   title: z.string(),
   summary: z.string().optional(),
   tako: zTakoRef.optional(),
+  sources: z.array(zNodeSource).optional(),
+  searches: z.array(z.string()).optional(), // Tako search queries this research/synthesis node ran
   chartSpec: zChartSpec.optional(),
   metric: z.object({ value: z.string(), label: z.string(), delta: z.string().optional() }).optional(),
   criteria: z.object({ weights: z.record(z.number()) }).optional(),
@@ -78,6 +88,7 @@ export type NodeType = z.infer<typeof zNodeType>;
 export type EdgeKind = z.infer<typeof zEdgeKind>;
 export type ChartSpec = z.infer<typeof zChartSpec>;
 export type TakoRef = z.infer<typeof zTakoRef>;
+export type NodeSource = z.infer<typeof zNodeSource>;
 export type ConsensusRow = z.infer<typeof zConsensusRow>;
 export type CanvasNode = z.infer<typeof zCanvasNode>;
 export type CanvasEdge = z.infer<typeof zCanvasEdge>;
@@ -90,6 +101,14 @@ export interface CanvasState {
 
 export type ProviderId = "gpt" | "claude" | "tako";
 
+export interface ChatTurn {
+  id: string;
+  role: "user" | "agent";
+  text: string;
+  surface: "main" | "side_chat";
+  focus?: string[];
+}
+
 export interface AgentRequest {
   canvasId: string;
   message: string;
@@ -98,6 +117,8 @@ export interface AgentRequest {
   selection?: { nodeIds: string[]; nodes: Partial<CanvasNode>[] };
   providerId: ProviderId;
   takoAnswerEnabled?: boolean;
+  history: ChatTurn[];
+  historySummary?: string;
 }
 
 // TurnTrace is defined in lib/agents/shared/types.ts to keep this file dependency-free.
@@ -106,6 +127,7 @@ export interface AgentResponse {
   narration: string;
   sideReply: string | null;
   trace?: import("./agents/shared/types").TurnTrace;
+  memory?: { summary?: string; summarizedThrough?: string };
   debug?: unknown;
 }
 
