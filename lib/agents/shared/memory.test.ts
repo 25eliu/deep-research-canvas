@@ -19,7 +19,7 @@ describe("foldHistory", () => {
 
   it("folds turns older than the window into the summary", async () => {
     const turns = Array.from({ length: 5 }, (_, i) => turn(`m${i}`, `msg${i}`));
-    const summarize = vi.fn(async () => "SUMMARY_TEXT");
+    const summarize = vi.fn(async (_turnsText: string, _priorSummary?: string) => "SUMMARY_TEXT");
     const r = await foldHistory({ turns, priorSummary: "PRIOR" }, summarize, 3);
     expect(summarize).toHaveBeenCalledTimes(1);
     // older = m0,m1 (5 - window 3); newest folded id = m1
