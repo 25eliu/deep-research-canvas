@@ -337,6 +337,19 @@ a:hover { text-decoration: underline; }
   color: var(--muted); margin-bottom: 3px;
 }
 .graph-entity { margin: 1px 0; }
+/* standalone series from the metric-typed graph search (vs a resolved entity) */
+.graph-entity.metric .graph-entity-name { color: var(--slate); font-style: italic; }
+
+/* raw graph API calls (debug drill-down): exact request + full response items */
+.graph-calls-label { margin-top: 6px; }
+.trace-graph .tako-call { margin-left: 0; }
+.graph-call .tako-call-fullquery::before, .graph-call .tako-call-fullquery::after { content: none; }
+.graph-result { margin: 2px 0 6px 18px; }
+.graph-result-head { display: flex; align-items: baseline; gap: 6px; }
+.graph-result-name { font-size: 11.5px; font-weight: 550; color: var(--ink-soft); overflow-wrap: anywhere; }
+.graph-result-type { flex: none; font-family: var(--font-mono); font-size: 9.5px; color: var(--muted); }
+.graph-result-aliases { font-size: 10.5px; color: var(--muted); overflow-wrap: anywhere; }
+.graph-result-desc { font-size: 10.5px; color: var(--muted); line-height: 1.45; overflow-wrap: anywhere; }
 .graph-entity-row {
   display: flex; align-items: center; gap: 5px; width: 100%; text-align: left; padding: 2px 2px;
   font-size: 11.5px; color: var(--ink-soft); border-radius: var(--r-sm);
@@ -583,3 +596,12 @@ a:hover { text-decoration: underline; }
 @keyframes cardIn { from { opacity: 0; transform: translateY(12px) scale(0.985); } to { opacity: 1; transform: none; } }
 @keyframes pulse { 0%, 100% { opacity: 0.35; transform: scale(0.8); } 50% { opacity: 1; transform: scale(1.1); } }
 @media (prefers-reduced-motion: reduce) { * { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; } }
+
+/* grounded-in trace block + node chips */
+.grounded-in { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--hairline, rgba(0,0,0,0.08)); }
+.grounded-in-label { font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase; opacity: 0.6; margin-bottom: 6px; }
+.grounded-in-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.ground-chip { font-size: 12px; padding: 3px 9px; border-radius: 999px; border: 1px solid var(--hairline, rgba(0,0,0,0.12)); background: var(--chip-bg, rgba(0,0,0,0.03)); color: inherit; cursor: default; text-decoration: none; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ground-chip.node { cursor: pointer; }
+.ground-chip.node:hover { background: var(--accent-soft, rgba(16,185,129,0.14)); border-color: var(--accent, rgba(16,185,129,0.5)); }
+.ground-chip.tako-src { background: rgba(16,185,129,0.12); border-color: rgba(16,185,129,0.35); }

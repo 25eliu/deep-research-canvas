@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useId, useState } from "react";
-import { traceToDisplay, stepsToDisplay, countCalls, type TurnTrace, type LiveStep } from "@/lib/trace";
+import { traceToDisplay, stepsToDisplay, countCalls, groundedInOf, type TurnTrace, type LiveStep } from "@/lib/trace";
 import { IconChevronRight } from "./icons";
 import TraceNode from "./TraceNode";
 
@@ -10,8 +10,8 @@ import TraceNode from "./TraceNode";
 // authoritative `trace` once it lands. Auto-expanded while streaming; collapses to
 // a one-click summary when finalized.
 export default function TraceView({
-  trace, steps, streaming,
-}: { trace?: TurnTrace; steps?: LiveStep[]; streaming: boolean }) {
+  trace, steps, streaming, onSelectNode,
+}: { trace?: TurnTrace; steps?: LiveStep[]; streaming: boolean; onSelectNode?: (id: string) => void }) {
   const [open, setOpen] = useState(streaming);
   useEffect(() => setOpen(streaming), [streaming]); // open live, collapse on finalize
   const panelId = useId();
@@ -23,6 +23,8 @@ export default function TraceView({
   const seconds = trace?.ms != null ? (trace.ms / 1000).toFixed(trace.ms < 1000 ? 2 : 1) : null;
   const resolved = trace?.graph?.resolved.length ?? 0;
   const findings = (trace?.tree ?? []).reduce((n, node) => n + (node.findingCount ?? 0), 0);
+  const grounded = groundedInOf(trace);
+  const hasGrounded = grounded.nodes.length > 0 || grounded.cards.length > 0 || grounded.takoAnswerUsed;
 
   return (
     <div className="turn-trace">
@@ -48,6 +50,36 @@ export default function TraceView({
               <TraceNode node={node} />
             </div>
           ))}
+          {hasGrounded && (
+            <div className="grounded-in">
+              <div className="grounded-in-label">Grounded in</div>
+              <div className="grounded-in-chips">
+                {grounded.nodes.map((n) => (
+                  <button
+                    key={n.id}
+                    type="button"
+                    className="ground-chip node"
+                    onClick={() => onSelectNode?.(n.id)}
+                    title="Focus this node on the canvas"
+                  >
+                    {n.title}
+                  </button>
+                ))}
+                {grounded.takoAnswerUsed && <span className="ground-chip tako-src">Tako answer</span>}
+                {grounded.cards.map((c) => (
+                  <a
+                    key={c.id}
+                    className="ground-chip card"
+                    href={c.url || undefined}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    {c.title}
+                  </a>
+                ))}
+              </div>
+            </div>
+          )}
           {trace && (
             <div className="trace-footer">
               <span>RESOLVED {resolved}</span>
