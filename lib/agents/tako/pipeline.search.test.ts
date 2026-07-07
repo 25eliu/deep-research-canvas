@@ -9,7 +9,7 @@ const h = vi.hoisted(() => ({
 
 vi.mock("../../llm", () => ({
   generateStructured: vi.fn(async (opts: any) => {
-    if (opts.label === "decompose") return { atomic: true, rationale: "direct", entities: [], metrics: [] };
+    if (opts.label === "decompose") return { atomic: true, rationale: "direct", entities: ["US"], metrics: [] };
     if (opts.label === "search-leaf-compose") return { queries: h.leaf };
     if (opts.label === "search-broad-compose") return { queries: h.broad };
     if (opts.label === "answer-report") return h.report;

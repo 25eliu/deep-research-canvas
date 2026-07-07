@@ -43,6 +43,6 @@ export async function runTako(
     canvasOps: ops,
     narration: result.narration,
     sideReply: result.sideReply,
-    trace: { action, provider: "tako", queries: [], cards: [], opsApplied: ops.length, notes: [], ms: 0, ...result.trace } as any,
+    trace: { action, provider: req.providerId, queries: [], cards: [], opsApplied: ops.length, notes: [], ms: 0, ...result.trace } as any,
   };
 }
