@@ -54,7 +54,7 @@ export async function POST(req: Request) {
           cards: (trace as any).cards?.length ?? 0,
           total: trace.ms,
         });
-        send({ type: "result", canvasOps: result.canvasOps, narration: result.narration, sideReply: result.sideReply, trace });
+        send({ type: "result", canvasOps: result.canvasOps, narration: result.narration, sideReply: result.sideReply, memory: result.memory, trace });
       } catch (e: any) {
         turn.fail(`turn ${request.providerId} failed`, { error: String(e?.message || e) });
         send({ type: "error", error: String(e?.message || e) });
