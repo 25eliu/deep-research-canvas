@@ -31,6 +31,16 @@ export interface TakoCallRecord {
   error?: string; // present instead of cards when the call failed
 }
 
+// One raw Tako GRAPH API call (search or related), captured verbatim for the trace's
+// drill-down: the exact request params as sent and the (compacted) response items.
+export interface GraphCallRecord {
+  endpoint: "graph/search" | "graph/related";
+  params: { q?: string; types?: string; subtype?: string; node_id?: string; relation_type?: string; limit?: number };
+  ms: number;
+  results: { id?: string; name: string; type?: string; subtype?: string; aliases?: string[]; description?: string }[];
+  error?: string; // present (with results []) when the call failed
+}
+
 // One node of the research tree, for trace/debug visibility.
 export interface TraceTreeNode {
   nodeId: string;
@@ -44,9 +54,11 @@ export interface TraceTreeNode {
   entities?: string[]; // entities this (sub)question was decomposed to (drive the queries)
   metrics?: string[]; // metrics this (sub)question targets
   // What the Tako graph actually resolved for this node: each entity → the related
-  // metric names the graph has for it (from graphSearch + graphRelated).
-  graph?: { entity: string; related: string[] }[];
+  // metric names the graph has for it (from graphSearch + graphRelated), plus an
+  // optional kind:"metric" row for standalone series the metric-typed search found.
+  graph?: { entity: string; related: string[]; kind?: "entity" | "metric" }[];
   calls?: TakoCallRecord[]; // every Tako call this node issued (query→cards linkage)
+  graphCalls?: GraphCallRecord[]; // every raw graph API call this node issued (params + response)
 }
 
 export interface TurnTrace {
@@ -65,6 +77,12 @@ export interface TurnTrace {
   // fills these directly, since it has no research tree).
   calls?: TakoCallRecord[];
   reasoning?: { nodeId: string; question: string; rationale: string }[];
+  // Which board nodes / Tako grounding actually fed this turn's answer.
+  groundedIn?: {
+    nodes: { id: string; title: string }[];
+    takoAnswerUsed: boolean;
+    cards: { id: string; title: string; url: string }[];
+  };
 }
 
 // What a Tako sub-pipeline (initial / followup) returns to the agent. Node ops
