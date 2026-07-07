@@ -4,7 +4,7 @@ import { applyOps, type CanvasOp } from "@/lib/schema";
 import { computeStructuredLayout } from "@/lib/layout";
 import {
   type Session, type Provider, type Surface, type ChatMsg, type CanvasView,
-  newSession, loadSessions, saveSessions, hasStarted, uid,
+  newSession, loadSessions, saveSessions, hasStarted, uid, buildHistory,
 } from "@/lib/sessions";
 import type { LiveStep } from "@/lib/trace";
 import Sidebar from "@/components/Sidebar";
@@ -96,6 +96,7 @@ export default function Page() {
           canvasState: snap.state,
           selection: { nodeIds: selection, nodes: selection.map((id) => nodeById[id]).filter(Boolean) },
           providerId: snap.provider, takoAnswerEnabled: snap.takoAnswer,
+          history: buildHistory(snap), historySummary: snap.summary,
         }),
       });
       if (!res.body) throw new Error("no response stream");
@@ -177,7 +178,14 @@ export default function Page() {
               const messages = s.messages.map((m) =>
                 m.id === id ? { ...m, text: answer || m.text, trace: evt.trace, steps: undefined } : m,
               );
-              return { ...s, state: nextState, messages };
+              const memory = evt.memory as { summary?: string; summarizedThrough?: string } | undefined;
+              return {
+                ...s,
+                state: nextState,
+                messages,
+                summary: memory?.summary ?? s.summary,
+                summaryUpToId: memory?.summarizedThrough ?? s.summaryUpToId,
+              };
             });
           }
         }
@@ -533,6 +541,7 @@ export default function Page() {
         loading={loading}
         loadingStage={loadingStage}
         error={error}
+        onSelectNode={(id) => setSelection([id])}
       />
     </div>
   );

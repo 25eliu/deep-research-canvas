@@ -7,7 +7,7 @@ import TraceView from "./TraceView";
 
 export default function ChatPanel({
   away, collapsed, onToggleCollapse, messages, selectionTitles, onClearSelection,
-  onSend, loading, loadingStage, error,
+  onSend, loading, loadingStage, error, onSelectNode,
 }: {
   away: boolean;
   collapsed: boolean;
@@ -19,6 +19,7 @@ export default function ChatPanel({
   loading: boolean;
   loadingStage: string;
   error: string | null;
+  onSelectNode: (id: string) => void;
 }) {
   const [text, setText] = useState("");
   const threadRef = useRef<HTMLDivElement>(null);
@@ -96,7 +97,7 @@ export default function ChatPanel({
                   <div className="msg-tag"><span className="focus-pill">{m.focus.join(", ")}</span></div>
                 ) : null}
                 {m.text ? <div className="turn-answer"><Markdown text={m.text} /></div> : null}
-                {hasTrace ? <TraceView trace={m.trace} steps={m.steps} streaming={streaming} /> : null}
+                {hasTrace ? <TraceView trace={m.trace} steps={m.steps} streaming={streaming} onSelectNode={onSelectNode} /> : null}
                 {!m.text && !hasTrace ? <div className="loading-line shimmer">Thinking…</div> : null}
               </div>
             </div>
