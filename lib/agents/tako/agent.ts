@@ -7,10 +7,13 @@ import { ctxBlock } from "../shared/ctx";
 import { ROUTER, zRoute } from "../shared/router";
 import { runTakoInitial } from "./pipeline";
 import { runTakoFollowup } from "./followup";
+import { graphStrategy, type QueryStrategy } from "./strategy";
 
 const OPENAI = "openai" as const;
 
-export async function runTako(req: AgentRequest, emit?: EmitFn): Promise<AgentResponse> {
+export async function runTako(
+  req: AgentRequest, emit?: EmitFn, strategy: QueryStrategy = graphStrategy,
+): Promise<AgentResponse> {
   // Route first (fast, cheap).
   emit?.({ type: "trace", stage: "routing" });
   const hasBoard = req.canvasState.nodes.length > 0;
@@ -25,7 +28,7 @@ export async function runTako(req: AgentRequest, emit?: EmitFn): Promise<AgentRe
   const action = hasBoard ? route.action : "NEW_BOARD";
 
   const isFollowup = action === "EXPLAIN" || action === "AUGMENT" || action === "REPLACE";
-  const result = isFollowup ? await runTakoFollowup(req, emit) : await runTakoInitial(req, emit);
+  const result = isFollowup ? await runTakoFollowup(req, emit) : await runTakoInitial(req, emit, strategy);
 
   // Node ops were already streamed; sanitize + provenance-filter them, then let
   // relate.ts append the structural edges. The result carries the authoritative

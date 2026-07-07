@@ -4,12 +4,15 @@ import { FindingLedger } from "./findings";
 import { research, newResearchCtx, toNodeSources, SYNTH_ID } from "./research";
 import { composeReport } from "./compose";
 import { log } from "../../log";
+import { graphStrategy, type QueryStrategy } from "./strategy";
 
 // Initial-turn Tako pipeline: builds a recursive research tree (see research.ts)
 // and returns the authoritative op set. All node/edge ops are streamed live via
 // emit; the root answer streams into the "synth" block, sub-answers into their
 // own research nodes.
-export async function runTakoInitial(req: AgentRequest, emit?: EmitFn): Promise<PipelineResult> {
+export async function runTakoInitial(
+  req: AgentRequest, emit?: EmitFn, strategy: QueryStrategy = graphStrategy,
+): Promise<PipelineResult> {
   const ledger = new FindingLedger();
   const nodeOps: CanvasOp[] = [];
   const allowedNodeIds = new Set<string>();
@@ -23,7 +26,7 @@ export async function runTakoInitial(req: AgentRequest, emit?: EmitFn): Promise<
     if (ops.length) emit?.({ type: "ops", ops });
   };
 
-  const ctx = newResearchCtx(req, ledger, push, emit);
+  const ctx = newResearchCtx(req, ledger, push, emit, strategy);
   const rootResult = await research(req.message, 0, ctx, { root: true });
 
   // No evidence anywhere → no synth node; fall back to a plain chat answer.

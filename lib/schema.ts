@@ -114,7 +114,7 @@ export interface CanvasState {
   edges: CanvasEdge[];
 }
 
-export type ProviderId = "gpt" | "claude" | "tako";
+export type ProviderId = "gpt" | "claude" | "tako" | "tako-search";
 
 export interface ChatTurn {
   id: string;

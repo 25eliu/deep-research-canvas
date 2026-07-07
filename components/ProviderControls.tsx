@@ -3,6 +3,7 @@ import type { Provider } from "@/lib/sessions";
 
 export const PROVIDERS: { id: Provider; label: string }[] = [
   { id: "tako", label: "LLM + Tako" },
+  { id: "tako-search", label: "LLM + Tako (search-only)" },
   { id: "gpt", label: "GPT" },
   { id: "claude", label: "Claude" },
 ];
@@ -20,7 +21,7 @@ export function ProviderSeg({
           key={p.id}
           role="tab"
           aria-selected={provider === p.id}
-          className={`seg-btn${provider === p.id ? " on" : ""}${p.id === "tako" ? " tako" : ""}`}
+          className={`seg-btn${provider === p.id ? " on" : ""}${(p.id === "tako" || p.id === "tako-search") ? " tako" : ""}`}
           onClick={() => onChange(p.id)}
         >
           {p.label}

@@ -4,7 +4,7 @@
 import type { CanvasState, ChatTurn } from "./schema";
 import { slimTrace, type TurnTrace, type LiveStep } from "./trace";
 
-export type Provider = "gpt" | "claude" | "tako";
+export type Provider = "gpt" | "claude" | "tako" | "tako-search";
 export type Surface = "main" | "side_chat";
 
 export interface ChatMsg {

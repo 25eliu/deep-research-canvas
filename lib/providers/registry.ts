@@ -2,6 +2,7 @@ import type { AgentRequest, AgentResponse, ProviderId } from "../schema";
 import type { EmitFn } from "../agents/shared/types";
 import { runBaseline } from "../agents/baseline/agent";
 import { runTako } from "../agents/tako/agent";
+import { searchStrategy } from "../agents/tako/strategy";
 
 export interface ProviderCapabilities {
   structured_cards: boolean;
@@ -30,6 +31,11 @@ export const PROVIDERS: Record<ProviderId, ProviderDef> = {
     id: "tako", label: "LLM + Tako",
     capabilities: { structured_cards: true, tako_search: true, tako_graph: true, tako_answer: true, web_search: true },
     run: (r, e) => runTako(r, e),
+  },
+  "tako-search": {
+    id: "tako-search", label: "LLM + Tako (search-only)",
+    capabilities: { structured_cards: true, tako_search: true, tako_graph: false, tako_answer: true, web_search: true },
+    run: (r, e) => runTako(r, e, searchStrategy),
   },
 };
 
