@@ -17,14 +17,16 @@ export default function TraceView({
   const panelId = useId();
 
   const roots = trace ? traceToDisplay(trace) : stepsToDisplay(steps);
-  if (roots.length === 0 && !streaming) return null;
+  const grounded = groundedInOf(trace);
+  const hasGrounded = grounded.nodes.length > 0 || grounded.cards.length > 0 || grounded.takoAnswerUsed;
+  // A board-first (no-Tako) answer has an empty reasoning tree but real provenance —
+  // keep rendering so the "Grounded in" chips still show.
+  if (roots.length === 0 && !streaming && !hasGrounded) return null;
 
   const nCalls = trace ? countCalls(trace) : (steps?.filter((s) => s.t === "tako").length ?? 0);
   const seconds = trace?.ms != null ? (trace.ms / 1000).toFixed(trace.ms < 1000 ? 2 : 1) : null;
   const resolved = trace?.graph?.resolved.length ?? 0;
   const findings = (trace?.tree ?? []).reduce((n, node) => n + (node.findingCount ?? 0), 0);
-  const grounded = groundedInOf(trace);
-  const hasGrounded = grounded.nodes.length > 0 || grounded.cards.length > 0 || grounded.takoAnswerUsed;
 
   return (
     <div className="turn-trace">
@@ -85,6 +87,7 @@ export default function TraceView({
               <span>RESOLVED {resolved}</span>
               <span>CALLS {nCalls}</span>
               <span>FINDINGS {findings}</span>
+              {trace.timings?.graph != null && <span>GRAPH {trace.timings.graph}ms</span>}
               {seconds != null && <span>{seconds}s</span>}
             </div>
           )}
