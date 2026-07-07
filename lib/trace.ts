@@ -6,9 +6,9 @@
 // Depends only on the shared wire types (pure interfaces — safe in the client
 // bundle). sessions.ts imports FROM here; this file imports nothing from there,
 // so there is no import cycle.
-import type { TurnTrace, TraceTreeNode, TakoCallRecord } from "./agents/shared/types";
+import type { TurnTrace, TraceTreeNode, TakoCallRecord, GraphCallRecord } from "./agents/shared/types";
 
-export type { TurnTrace, TraceTreeNode, TakoCallRecord };
+export type { TurnTrace, TraceTreeNode, TakoCallRecord, GraphCallRecord };
 
 export type Grounding = "tako" | "model" | "web";
 
@@ -30,10 +30,11 @@ export interface TraceNodeView {
   rationale?: string;
   entities: string[]; // what this (sub)question decomposed to
   metrics: string[];
-  graph: { entity: string; related: string[] }[]; // what the Tako graph actually resolved
+  graph: { entity: string; related: string[]; kind?: "entity" | "metric" }[]; // what the Tako graph actually resolved
   findingCount: number;
   queries: string[];
   calls: TakoCallRecord[];
+  graphCalls: GraphCallRecord[]; // raw graph API calls (params + response) for drill-down
   children: TraceNodeView[];
   synthesizing?: boolean; // live only: synthesis in progress for this node
 }
@@ -49,6 +50,21 @@ export type LiveStep =
 // one without as web-grounded (slate). Model-drawn cards never appear in a trace.
 export function groundingOf(card: TraceCard): Grounding {
   return card.source ? "tako" : "web";
+}
+
+// Normalized provenance for the "Grounded in" trace block. Always well-formed so
+// the UI can render unconditionally.
+export function groundedInOf(trace: TurnTrace | undefined): {
+  nodes: { id: string; title: string }[];
+  takoAnswerUsed: boolean;
+  cards: TraceCard[];
+} {
+  const g = trace?.groundedIn;
+  return {
+    nodes: g?.nodes ?? [],
+    takoAnswerUsed: g?.takoAnswerUsed ?? false,
+    cards: g?.cards ?? [],
+  };
 }
 
 // Nest the flat authoritative tree (children = id refs) into render roots.
@@ -72,6 +88,7 @@ export function buildTree(flat: TraceTreeNode[] | undefined): TraceNodeView[] {
     findingCount: n.findingCount,
     queries: n.queries ?? [],
     calls: n.calls ?? [],
+    graphCalls: n.graphCalls ?? [],
     children: n.children.map((id) => byId.get(id)).filter(Boolean).map((c) => toView(c!)),
   });
 
@@ -91,7 +108,7 @@ export function stepsToDisplay(steps: LiveStep[] | undefined): TraceNodeView[] {
     if (!v) {
       v = {
         nodeId, depth: seed?.depth ?? 0, question: seed?.question ?? "", kind: seed?.kind ?? "leaf",
-        rationale: seed?.rationale, entities: [], metrics: [], graph: [], findingCount: 0, queries: [], calls: [], children: [],
+        rationale: seed?.rationale, entities: [], metrics: [], graph: [], findingCount: 0, queries: [], calls: [], graphCalls: [], children: [],
       };
       byId.set(nodeId, v);
       order.push(nodeId);

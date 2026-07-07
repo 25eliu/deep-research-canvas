@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildTree, stepsToDisplay, traceToDisplay, slimTrace, groundingOf, countCalls, type LiveStep } from "./trace";
+import { buildTree, stepsToDisplay, traceToDisplay, slimTrace, groundingOf, countCalls, groundedInOf, type LiveStep } from "./trace";
 import type { TurnTrace, TakoCallRecord } from "./agents/shared/types";
 
 const call = (nodeId: string, seq: number, cardId: string): TakoCallRecord => ({
@@ -105,5 +105,25 @@ describe("groundingOf / countCalls", () => {
     expect(countCalls(trace)).toBe(3);
     expect(countCalls({ ...trace, calls: undefined })).toBe(3); // falls back to tree
     expect(countCalls(undefined)).toBe(0);
+  });
+});
+
+describe("groundedInOf", () => {
+  it("returns empty structure when the trace has no groundedIn", () => {
+    expect(groundedInOf(undefined)).toEqual({ nodes: [], takoAnswerUsed: false, cards: [] });
+    expect(groundedInOf({} as any)).toEqual({ nodes: [], takoAnswerUsed: false, cards: [] });
+  });
+
+  it("passes through nodes/cards and the tako flag", () => {
+    const g = groundedInOf({
+      groundedIn: {
+        nodes: [{ id: "nvda", title: "Nvidia revenue" }],
+        takoAnswerUsed: true,
+        cards: [{ id: "c1", title: "Card", url: "https://x" }],
+      },
+    } as any);
+    expect(g.nodes[0].id).toBe("nvda");
+    expect(g.takoAnswerUsed).toBe(true);
+    expect(g.cards[0].id).toBe("c1");
   });
 });
