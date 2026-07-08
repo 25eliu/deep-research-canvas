@@ -76,6 +76,10 @@ function validateBlock(block: AnswerBlock, allowed: { strings: Set<string>; mags
         .filter((s) => s.points.length > 0);
       return series.length ? { ...block, chartSpec: { ...block.chartSpec, series } } : null;
     }
+    default:
+      // New block kinds (comparison/leaderboard/sections/timeline) get explicit
+      // validation in a later task; until then an unvalidated kind is dropped.
+      return null;
   }
 }
 
