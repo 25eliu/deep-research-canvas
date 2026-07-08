@@ -53,6 +53,54 @@ export const zAnswerBlock = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("table"), columns: z.array(z.string()), rows: z.array(z.array(z.string())) }),
   z.object({ kind: z.literal("chart"), title: z.string().optional(), chartSpec: zChartSpec }),
   z.object({ kind: z.literal("tiles"), tiles: z.array(z.object({ label: z.string(), value: z.string(), delta: z.string().optional() })) }),
+  // Multi-entity comparison built from REAL card CSVs (composer fetches via get_card_contents).
+  z.object({
+    kind: z.literal("comparison"),
+    title: z.string().optional(),
+    unit: z.string().optional(),
+    series: z.array(z.object({
+      label: z.string(),
+      entity: z.string(),
+      points: z.array(z.object({ x: z.union([z.string(), z.number()]), y: z.number() })),
+    })).min(1),
+    insight: z.string().optional(),
+  }),
+  // Ranked entities for "top XYZ" questions; detail = expandable row body.
+  z.object({
+    kind: z.literal("leaderboard"),
+    title: z.string().optional(),
+    metricLabel: z.string(),
+    rows: z.array(z.object({
+      rank: z.number(),
+      entity: z.string(),
+      value: z.string(),
+      delta: z.string().optional(),
+      detail: z.object({
+        md: z.string(),
+        stats: z.array(z.object({ label: z.string(), value: z.string() })).optional(),
+      }).optional(),
+    })).min(1),
+  }),
+  // One titled section per factor/driver for "what's affecting X" questions.
+  z.object({
+    kind: z.literal("sections"),
+    sections: z.array(z.object({
+      title: z.string(),
+      md: z.string(),
+      figure: z.object({ label: z.string(), value: z.string(), delta: z.string().optional() }).optional(),
+      chartSpec: zChartSpec.optional(),
+    })).min(1),
+  }),
+  // Dated milestones for "how did X evolve" questions.
+  z.object({
+    kind: z.literal("timeline"),
+    events: z.array(z.object({
+      date: z.string(),
+      title: z.string(),
+      md: z.string().optional(),
+      value: z.string().optional(),
+    })).min(1),
+  }),
 ]);
 export const zAnswerReport = z.object({ verdict: z.string(), blocks: z.array(zAnswerBlock) });
 
