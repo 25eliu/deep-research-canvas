@@ -184,8 +184,11 @@ async function gatherCardContents(
   if (catalog.length === 0) return { notes: "", fetched };
   ctx.contents.cap = ctx.contents.fetched + COMPOSER_CONTENTS_BUDGET;
   try {
+    // No reasoningEffort here: OpenAI rejects function tools + reasoning_effort on
+    // /v1/chat/completions for gpt-5.4 (verified live). Deep reasoning stays on the
+    // tool-free report emit below; the gather phase is a fetch decision, not analysis.
     const res = await generateWithTools({
-      provider: "openai", model: deepModel(), reasoningEffort: "high",
+      provider: "openai", model: deepModel(),
       system: REPORT_GATHER_SYSTEM,
       prompt: `${ctxBlock(ctx.req)}\n\nQUESTION: ${question}\n\nCARD_CATALOG: ${JSON.stringify(catalog)}\n\nSUB_ANSWERS: ${JSON.stringify(ctx.branchResults.map((b) => ({ question: b.question, claim: b.claim })))}`,
       maxSteps: COMPOSER_MAX_STEPS, label: "report-gather",
