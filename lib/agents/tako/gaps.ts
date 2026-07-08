@@ -37,6 +37,7 @@ export async function runGapRound(ctx: ResearchCtx, question: string): Promise<G
       system: GAP_SYSTEM,
       prompt: `${ctxBlock(ctx.req)}\n\nQUESTION: ${question}\n\nEVIDENCE: ${JSON.stringify(digest)}`,
       schema: zGapPlan, label: "gap-analysis",
+      reasoningEffort: "high",
     });
   } catch (e: unknown) {
     ctx.notes.push(`gap analysis failed — ${errorMessage(e)}`);
