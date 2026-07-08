@@ -23,7 +23,7 @@ export interface TakoCallRecord {
   callId: string;
   nodeId: string;
   query: string;
-  endpoint: "/v3/search" | "/v1/answer";
+  endpoint: "/v3/search" | "/v1/answer" | "/v1/contents";
   effort: "fast" | "instant";
   web?: boolean;
   ms: number;
@@ -60,6 +60,7 @@ export interface TraceTreeNode {
   calls?: TakoCallRecord[]; // every Tako call this node issued (query→cards linkage)
   graphCalls?: GraphCallRecord[]; // every raw graph API call this node issued (params + response)
   graphMs?: number; // wall-clock ms of this node's whole graph phase (search + related + discovery)
+  gapFill?: boolean; // minted by the gap-fill round (renders with a badge)
 }
 
 export interface TurnTrace {
@@ -112,7 +113,7 @@ export type AgentEvent =
       nodeId: string;
       depth: number;
       question: string;
-      kind: "branch" | "leaf";
+      kind: "branch" | "leaf" | "gap";
       rationale?: string;
       entities?: string[]; // entities this (sub)question decomposed to
       metrics?: string[]; // metrics it targets

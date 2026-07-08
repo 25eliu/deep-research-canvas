@@ -26,7 +26,7 @@ export interface TraceNodeView {
   nodeId: string;
   depth: number;
   question: string;
-  kind: "branch" | "leaf";
+  kind: "branch" | "leaf" | "gap";
   rationale?: string;
   entities: string[]; // what this (sub)question decomposed to
   metrics: string[];
@@ -38,11 +38,12 @@ export interface TraceNodeView {
   graphMs?: number; // wall-clock of the node's graph phase
   children: TraceNodeView[];
   synthesizing?: boolean; // live only: synthesis in progress for this node
+  gapFill?: boolean;
 }
 
 // Live steps accumulated from streamed events before the authoritative trace lands.
 export type LiveStep =
-  | { t: "reasoning"; nodeId: string; depth: number; question: string; kind: "branch" | "leaf"; rationale?: string; entities?: string[]; metrics?: string[]; subQuestions?: string[] }
+  | { t: "reasoning"; nodeId: string; depth: number; question: string; kind: "branch" | "leaf" | "gap"; rationale?: string; entities?: string[]; metrics?: string[]; subQuestions?: string[] }
   | { t: "tako"; call: TakoCallRecord }
   | { t: "synth"; nodeId: string; phase: "start" | "end" };
 
@@ -92,6 +93,7 @@ export function buildTree(flat: TraceTreeNode[] | undefined): TraceNodeView[] {
     graphCalls: n.graphCalls ?? [],
     graphMs: n.graphMs,
     children: n.children.map((id) => byId.get(id)).filter(Boolean).map((c) => toView(c!)),
+    gapFill: n.gapFill,
   });
 
   return flat.filter((n) => !childIds.has(n.nodeId)).map(toView);

@@ -30,9 +30,9 @@ export function synthNode(headline: string, summary: string): CanvasNode {
   return { id: SYNTH_ID, type: "text", role: "synthesis", title: headline || "Synthesis", summary, grounding: "tako", confidence: 0.9 };
 }
 
-export function researchNode(id: string, question: string, summary: string): CanvasNode {
+export function researchNode(id: string, question: string, summary: string, gapFill?: boolean): CanvasNode {
   // section:id groups this node's findings beneath it in the tree layout.
-  return { id, type: "text", role: "research", section: id, title: question, summary, grounding: "tako", confidence: 0.85 };
+  return { id, type: "text", role: "research", section: id, title: question, summary, grounding: "tako", confidence: 0.85, ...(gapFill ? { gapFill: true } : {}) };
 }
 
 export function feedsEdge(from: string, to: string): CanvasOp {
@@ -203,7 +203,7 @@ export function uniqueResearchId(ctx: ResearchCtx, question: string): string {
 
 export async function researchLeaf(
   question: string, depth: number, nodeId: string, root: boolean, ctx: ResearchCtx,
-  entities: string[], metrics: string[], rationale?: string,
+  entities: string[], metrics: string[], rationale?: string, opts?: { gapFill?: boolean },
 ): Promise<ResearchResult> {
   const { queries, graph, metrics: planMetrics, graphCalls, graphMs } = await ctx.strategy.leafQueries(ctx, question, entities, metrics);
   // The strategy may have enriched the planner's metric guesses with graph-confirmed
@@ -212,7 +212,7 @@ export async function researchLeaf(
   ctx.queries.push(...queries);
 
   // The empty research node must exist before any of its finding/token ops.
-  if (!root) ctx.push([{ op: "add_node", node: researchNode(nodeId, question, "") }]);
+  if (!root) ctx.push([{ op: "add_node", node: researchNode(nodeId, question, "", opts?.gapFill) }]);
 
   const { dataFindings, webSources, calls } = await runSearches(question, nodeId, queries, ctx);
   const found = dataFindings.length + webSources.length;
@@ -242,7 +242,7 @@ export async function researchLeaf(
   if (root) {
     ctx.push([{ op: "add_node", node: synthNode("", "") }]);
     ctx.branchResults.push({ question, claim: "", confidence: found > 0 ? 0.8 : 0.3, figures });
-    ctx.tree.push({ nodeId, depth, question, kind: "leaf", findingCount: found, children: [], queries, rationale, entities, metrics: treeMetrics, graph, calls, graphCalls, graphMs });
+    ctx.tree.push({ nodeId, depth, question, kind: "leaf", findingCount: found, children: [], queries, rationale, entities, metrics: treeMetrics, graph, calls, graphCalls, graphMs, ...(opts?.gapFill ? { gapFill: true } : {}) });
     return { nodeId, title: question, synthesis: "", findingCount: found, children: [], depth, kind: "leaf" };
   }
 
@@ -276,7 +276,7 @@ export async function researchLeaf(
     ...(queries.length ? { searches: queries } : {}),
     ...(leafSources.length ? { sources: leafSources } : {}),
   } }]);
-  ctx.tree.push({ nodeId, depth, question, kind: "leaf", findingCount: found, children: [], queries, rationale, entities, metrics: treeMetrics, graph, calls, graphCalls, graphMs });
+  ctx.tree.push({ nodeId, depth, question, kind: "leaf", findingCount: found, children: [], queries, rationale, entities, metrics: treeMetrics, graph, calls, graphCalls, graphMs, ...(opts?.gapFill ? { gapFill: true } : {}) });
   return { nodeId, title: question, synthesis: prose, findingCount: found, children: [], depth, kind: "leaf", claim, confidence: 0.8 };
 }
 

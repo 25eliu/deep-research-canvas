@@ -120,6 +120,7 @@ export const zCanvasNode = z.object({
   criteria: z.object({ weights: z.record(z.number()) }).optional(),
   consensusRows: z.array(zConsensusRow).optional(),
   report: zAnswerReport.optional(), // composed multi-block final answer (synthesis node)
+  gapFill: z.boolean().optional(), // research node minted by the post-tree gap-fill round
   grounding: zGrounding,
   confidence: z.number(),
   position: z.object({ x: z.number(), y: z.number() }).nullable().optional(),

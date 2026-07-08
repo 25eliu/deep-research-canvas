@@ -92,3 +92,12 @@ describe("zGapPlan — gap-analysis output", () => {
     expect(zGapPlan.safeParse({ sufficient: false, rationale: "r", gaps: [{ ...gap, entity: "" }] }).success).toBe(false);
   });
 });
+
+import { zCanvasNode } from "../../schema";
+
+describe("zCanvasNode.gapFill", () => {
+  it("accepts a research node flagged as gap-fill", () => {
+    const n = { id: "rq_x", type: "text", role: "research", title: "amd revenue", grounding: "tako", confidence: 0.85, gapFill: true };
+    expect(zCanvasNode.safeParse(n).success).toBe(true);
+  });
+});
