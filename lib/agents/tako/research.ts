@@ -5,7 +5,7 @@
 // synthesis is the main answer. Every node streams its synthesis live into its own
 // canvas node (findings → leaf, child → parent, top → root, via feeds/derived_from).
 import type { AgentRequest, CanvasOp, CanvasNode } from "../../schema";
-import type { EmitFn, TraceTreeNode, TakoCallRecord } from "../shared/types";
+import type { EmitFn, TraceTreeNode, TakoCallRecord, GraphCallRecord } from "../shared/types";
 import { generateStructured, streamAnswer } from "../../llm";
 import { ctxBlock } from "../shared/ctx";
 import { zResearchPlan, zWebFilter } from "../shared/schemas";
@@ -26,8 +26,8 @@ export const SYNTH_ID = "synth";
 // facets of one subject. MAX_DEPTH=2 is the ceiling; the deepest level gets a strict "separate
 // subjects only" brake (see decomposePrompt) so it can't spam the canvas with near-duplicates.
 const MAX_DEPTH = 2;
-const MAX_CHILDREN = 3; // hard cap of 3 sub-questions at EVERY level
-const TOTAL_RESEARCH_CAP = 12; // non-root research nodes (safety bound on a deep tree)
+const MAX_CHILDREN = 8; // safety ceiling on sub-questions per level — NOT a target; the prompt drives the real count (one per genuinely distinct facet)
+const TOTAL_RESEARCH_CAP = 20; // non-root research nodes (global backstop: ~8 root subs + ~12 descendants)
 const CONTENTS_CAP = 12; // max tako-contents (CSV/text) fetches per turn — bounds cost + latency
 const CSV_EXCERPT = 1800; // chars of a card's CSV series handed to the synthesis LLM
 
@@ -214,18 +214,31 @@ function uniqueResearchId(ctx: ResearchCtx, question: string): string {
   return id;
 }
 
+// The pressure toward decomposition decays with depth: the top-level question is the most likely to
+// warrant splitting; each level down leans harder toward atomic. This is the brake that stops recursive
+// re-decomposition into near-duplicate sub-questions. Structured as a per-depth ladder so it stays correct
+// if MAX_DEPTH is ever raised (higher depth → stronger atomic pressure).
+export function depthLean(depth: number): string {
+  if (depth === 0) {
+    // Top level — lenient: lean TOWARD splitting anything that isn't already one pair.
+    return `TOP-LEVEL — LEAN TOWARD SPLITTING: this is the user's overarching question. A research question` +
+      ` can target ONE entity + ONE metric at a time, so DECOMPOSE anything that names more: every comparison,` +
+      ` every "versus", basically every "and" — one sub-question per entity, per metric facet. Also split broad,` +
+      ` multi-faceted questions into their distinct drivers. Stay atomic ONLY when the question is already a` +
+      ` single entity + single metric lookup. The overarching/broad view is fetched by this parent — do NOT` +
+      ` create a sub-question for the general/overview topic.`;
+  }
+  // Deeper level — atomic only once the question is down to one entity + one metric.
+  return `DEEPER LEVEL: split this sub-question again ONLY if ITS OWN TEXT still names 2+ entities or` +
+    ` 2+ metrics ("X vs Y", "X and Y" → one sub-question each). It is ATOMIC when exactly one entity + one` +
+    ` metric remain ("energy prices" alone, "Nvidia revenue growth"). NEVER introduce an entity or metric` +
+    ` this sub-question does not itself name — siblings already cover the rest of the parent question.` +
+    ` Never split a single entity+metric pair further, and never reword the same pair twice. If in doubt, atomic.`;
+}
+
 function decomposePrompt(maxChildren: number, depth: number): string {
   const base = DECOMPOSE_SYSTEM.replace(/{MAX}/g, String(maxChildren));
-  // At the deepest level that may still split, split ONLY for genuinely separate subjects —
-  // this is the brake that stops recursive re-decomposition into near-duplicate sub-questions.
-  if (depth >= MAX_DEPTH - 1) {
-    return base +
-      `\nDEEPEST LEVEL: split this question ONE more time ONLY if it EXPLICITLY names 2+ different subjects` +
-      ` joined together (e.g. "energy AND gasoline prices" → "energy prices", "gasoline prices"). A SINGLE` +
-      ` subject — even a broad one like "energy prices" or "revenue growth" — is ATOMIC: answer it directly,` +
-      ` never split it further. If in doubt, atomic.`;
-  }
-  return base;
+  return `${base}\n${depthLean(depth)}`;
 }
 
 interface ResearchOpts { root: boolean; entities?: string[]; metrics?: string[] }
@@ -237,6 +250,8 @@ export async function research(question: string, depth: number, ctx: ResearchCtx
 
   // ---- decide: branch or leaf ----
   let atomic = true;
+  // Each (sub-)question carries a validated lookup PAIR (one entity term + one metric
+  // term); downstream plumbing stays array-shaped, so the pair maps to 1-element arrays.
   let subs: { question: string; entities?: string[]; metrics?: string[] }[] = [];
   let entities = opts.entities ?? [];
   let metrics = opts.metrics ?? [];
@@ -251,10 +266,16 @@ export async function research(question: string, depth: number, ctx: ResearchCtx
         prompt: `${ctxBlock(ctx.req)}\n\nRESEARCH_QUESTION: ${question}`, schema: zResearchPlan, label: "decompose",
       });
       atomic = plan.atomic || !plan.subQuestions?.length;
-      subs = (plan.subQuestions ?? []).slice(0, maxChildren);
+      // Deterministic re-split brake: a sub-question that merely restates THIS question
+      // (the model sometimes re-splits a sub-question into itself + an invented sibling)
+      // is dropped; if fewer than 2 genuine subs remain, the node stays a leaf.
+      subs = (plan.subQuestions ?? [])
+        .filter((s) => s.question.trim().toLowerCase() !== question.trim().toLowerCase())
+        .slice(0, maxChildren)
+        .map((s) => ({ question: s.question, entities: [s.entity], metrics: [s.metric] }));
       rationale = plan.rationale;
-      if (plan.entities?.length) entities = plan.entities;
-      if (plan.metrics?.length) metrics = plan.metrics;
+      if (plan.entity) entities = [plan.entity];
+      if (plan.metric) metrics = [plan.metric];
     } catch (e: unknown) {
       ctx.notes.push(`decompose failed — ${errorMessage(e)}`);
     }
@@ -301,7 +322,7 @@ export async function research(question: string, depth: number, ctx: ResearchCtx
     ctx.push([{ op: "add_node", node: synthNode("", "") }]);
     const bf = await broadFetch(question, nodeId, ctx, entities, metrics);
     ctx.figures.push(...extractFigures(bf.findings));
-    ctx.tree.push({ nodeId, depth, question, kind: "branch", findingCount: bf.findings.length, children, queries: bf.queries, rationale, entities, metrics, graph: bf.graph, calls: bf.calls });
+    ctx.tree.push({ nodeId, depth, question, kind: "branch", findingCount: bf.findings.length, children, queries: bf.queries, rationale, entities, metrics: bf.metrics ?? metrics, graph: bf.graph, calls: bf.calls, graphCalls: bf.graphCalls, graphMs: bf.graphMs });
     return { nodeId, title: question, synthesis: "", findingCount: bf.findings.length, children, depth, kind: "branch" };
   }
 
@@ -336,7 +357,10 @@ async function leaf(
   question: string, depth: number, nodeId: string, root: boolean, ctx: ResearchCtx,
   entities: string[], metrics: string[], rationale?: string,
 ): Promise<ResearchResult> {
-  const { queries, graph } = await ctx.strategy.leafQueries(ctx, question, entities, metrics);
+  const { queries, graph, metrics: planMetrics, graphCalls, graphMs } = await ctx.strategy.leafQueries(ctx, question, entities, metrics);
+  // The strategy may have enriched the planner's metric guesses with graph-confirmed
+  // canonical names — the tree records the enriched list as the authoritative one.
+  const treeMetrics = planMetrics ?? metrics;
   ctx.queries.push(...queries);
 
   // The empty research node must exist before any of its finding/token ops.
@@ -370,7 +394,7 @@ async function leaf(
   if (root) {
     ctx.push([{ op: "add_node", node: synthNode("", "") }]);
     ctx.branchResults.push({ question, claim: "", confidence: found > 0 ? 0.8 : 0.3, figures });
-    ctx.tree.push({ nodeId, depth, question, kind: "leaf", findingCount: found, children: [], queries, rationale, entities, metrics, graph, calls });
+    ctx.tree.push({ nodeId, depth, question, kind: "leaf", findingCount: found, children: [], queries, rationale, entities, metrics: treeMetrics, graph, calls, graphCalls, graphMs });
     return { nodeId, title: question, synthesis: "", findingCount: found, children: [], depth, kind: "leaf" };
   }
 
@@ -404,7 +428,7 @@ async function leaf(
     ...(queries.length ? { searches: queries } : {}),
     ...(leafSources.length ? { sources: leafSources } : {}),
   } }]);
-  ctx.tree.push({ nodeId, depth, question, kind: "leaf", findingCount: found, children: [], queries, rationale, entities, metrics, graph, calls });
+  ctx.tree.push({ nodeId, depth, question, kind: "leaf", findingCount: found, children: [], queries, rationale, entities, metrics: treeMetrics, graph, calls, graphCalls, graphMs });
   return { nodeId, title: question, synthesis: prose, findingCount: found, children: [], depth, kind: "leaf", claim, confidence: 0.8 };
 }
 
@@ -418,13 +442,13 @@ function firstSentence(prose: string): string {
 // the synth node, so the overarching answer is grounded in the general view.
 async function broadFetch(
   question: string, nodeId: string, ctx: ResearchCtx, entities: string[], metrics: string[],
-): Promise<{ findings: Finding[]; queries: string[]; calls: TakoCallRecord[]; graph: { entity: string; related: string[] }[] }> {
-  const { queries, graph } = await ctx.strategy.broadQueries(ctx, question, entities, metrics);
+): Promise<{ findings: Finding[]; queries: string[]; calls: TakoCallRecord[]; graph: { entity: string; related: string[] }[]; metrics?: string[]; graphCalls?: GraphCallRecord[]; graphMs?: number }> {
+  const { queries, graph, metrics: planMetrics, graphCalls, graphMs } = await ctx.strategy.broadQueries(ctx, question, entities, metrics);
   ctx.queries.push(...queries);
 
   // Broad chart cards feed the synth; broad web sources are filtered into ctx.webSources.
   const { dataFindings, calls } = await runSearches(question, nodeId, queries, ctx);
-  return { findings: dataFindings, queries, calls, graph };
+  return { findings: dataFindings, queries, calls, graph, metrics: planMetrics, graphCalls, graphMs };
 }
 
 // Keep only the web sources genuinely useful for the question (LLM gate).

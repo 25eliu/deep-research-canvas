@@ -46,19 +46,24 @@ export type BranchResult = z.infer<typeof zBranchResult>;
 
 // Recursive decompose step: the LLM decides whether a research question is atomic
 // (fetch data directly) or should split into distinct sub-questions (branch).
+// Every question — the plan itself and each sub-question — is a validated LOOKUP PAIR:
+// exactly ONE entity term (searched only in the graph's entity namespace) + ONE metric
+// term (searched only in the metric namespace). Singular fields are deliberate: they
+// force the one-target-per-question model on the LLM, and a missing/empty half fails
+// validation so generateObject retries instead of proceeding half-grounded.
 export const zResearchPlan = z.object({
   atomic: z.boolean(),
   // 1-2 sentences: WHY this question is atomic or splits into these sub-questions.
   // Surfaced to the user as the "reasoning" step for this research node.
   rationale: z.string(),
-  // entities/metrics for THIS question, used when atomic (leaf fetch grounding).
-  entities: z.array(z.string()).default([]),
-  metrics: z.array(z.string()).default([]),
+  // The lookup pair for THIS question (leaf fetch / broad-view grounding).
+  entity: z.string().min(1),
+  metric: z.string().min(1),
   subQuestions: z.array(z.object({
     question: z.string(),
     rationale: z.string().optional(), // why this facet matters (optional per-sub reasoning)
-    entities: z.array(z.string()).default([]),
-    metrics: z.array(z.string()).default([]),
+    entity: z.string().min(1),
+    metric: z.string().min(1),
   })).optional(),
 });
 

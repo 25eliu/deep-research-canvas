@@ -59,6 +59,7 @@ export interface TraceTreeNode {
   graph?: { entity: string; related: string[]; kind?: "entity" | "metric" }[];
   calls?: TakoCallRecord[]; // every Tako call this node issued (query→cards linkage)
   graphCalls?: GraphCallRecord[]; // every raw graph API call this node issued (params + response)
+  graphMs?: number; // wall-clock ms of this node's whole graph phase (search + related + discovery)
 }
 
 export interface TurnTrace {

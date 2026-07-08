@@ -3,25 +3,44 @@ import { ROUTER } from "../shared/router";
 export const BREAKDOWN_SYSTEM = `You break a research question into parts for the Tako graph.
 Return { entities: string[], metrics: string[], subtypes?: {name:type} }.
 - entities = the concrete things to compare (companies, countries, indices). Resolve a cohort ("top 5 chip makers") into concrete names.
-- metrics = the measures the question needs (e.g. "Revenue", "P/E", "unemployment rate").
+  For companies use the FORMAL registered name ("Apple Inc.", not "Apple") — graph lookup is keyword-based and company nodes are named formally.
+- metrics = the measures the question needs, as SHORT canonical metric names likely to match a real metric
+  name/alias ("Revenue", "P/E", "Unemployment Rate") — matching is keyword on names/aliases, so never
+  analytical phrases like "year-to-date stock performance". Entity terms are looked up ONLY in the entity
+  namespace and metric terms ONLY in the metric namespace — classify each term for the namespace it belongs to.
 - subtypes = disambiguation for ambiguous entity names (e.g. {"Georgia":"Countries"}).
 Prefer a handful, not an exhaustive list.`;
 
-export const COMPOSE_SYSTEM = `You write Tako /v3/search queries for ONE SPECIFIC sub-question, grounded in resolved graph nodes.
-You are given the SUB_QUESTION and RESOLVED (entity/metric names + aliases). Write short queries that target
-the SPECIFIC metric(s) the sub-question is about — this is a narrow drill-down, not an overview.
+// The leaf's PRIMARY query composer. The availability list (RESOLVED) is deterministic —
+// parsed verbatim from the graph API responses — the LLM only PICKS from it and WORDS the
+// queries. A deterministic guard afterwards drops any query citing nothing from the list.
+export const COMPOSE_SYSTEM = `You write Tako /v3/search queries for ONE SPECIFIC sub-question, grounded in resolved graph data.
+You are given the SUB_QUESTION and RESOLVED — what the Tako graph actually has: each resolved entity with its
+available metrics (name [aliases] — description), and possibly a "Standalone series" list (country-level series).
+Return { queries: string[] } — 1 to 3.
 Rules:
-- Target the specific metric named/implied by the sub-question. NEVER write generic "overview", "ratios",
-  "earnings & estimates", or whole-entity summary queries — a parent agent already owns the broad view.
-- One query per distinct data point. No paraphrases or reworded restatements of another query.
-- Prefer queries whose wording is visibly different from one another.
-Return { queries: string[] } — distinct, specific, <= 6.`;
+- Phrase each query as a concise natural-language data question or ask (e.g. "How has US shelter CPI changed
+  in 2025?", "How much revenue did Nvidia make last quarter?") — not a bare keyword string.
+- Each query names exactly ONE entity/subject. Tako search resolves single-entity questions far better than
+  combined ones — NEVER "X vs Y" or "compare X and Y" in one query. A comparison = one query PER entity, each
+  citing the SAME metric (e.g. "How much data center revenue did Nvidia make?" + "How much data center revenue
+  did AMD make?").
+- Every query MUST cite one specific metric/series from RESOLVED — its exact name or one of its listed
+  aliases — AND name a concrete subject (the entity, or the geography a standalone series implies).
+  Never a bare metric name alone; never a metric that is not in RESOLVED.
+- Pick ONLY metrics that answer the SUB_QUESTION. RESOLVED contains fuzzy matches about unrelated subjects —
+  ignore them entirely.
+- Each query targets a DISTINCT data point/angle — no paraphrases or reworded restatements of another query.
+  NEVER generic "overview"/"ratios"/whole-entity summary queries — a parent agent already owns the broad view.
+- When RESOLVED is "(none)", compose 1-3 specific data questions directly from the SUB_QUESTION.`;
 
 // Broad/overview compose — used ONLY by the overarching (root) agent so the
 // general graph is fetched once at the top, not redundantly by every sub-agent.
 export const BROAD_COMPOSE_SYSTEM = `You write 1-2 Tako /v3/search queries for the BROAD/overview view of the user's overall question.
 Given the QUESTION and RESOLVED entities, write the query (or two) that best captures the headline/overview
-data for the whole question (e.g. the overall inflation rate, or the top-line comparison). Keep it high-level.
+data for the whole question (e.g. the overall inflation rate, or the headline metric). Keep it high-level.
+Each query names exactly ONE entity/subject — Tako search can't handle multi-entity queries. For a two-entity
+comparison use both slots: one headline query per entity, same measure.
 Every query must pair a concrete subject (entity, country, region) with a measure — never a bare metric name alone.
 Return { queries: string[] } — 1 to 2 queries.`;
 
@@ -34,72 +53,52 @@ For any part you could not ground, add a text node stating the gap ("Tako has X 
 Return canvasOps, a <=2 sentence narration, and sideReply (usually null on NEW_BOARD).`;
 
 // Recursive decompose: decide whether to split a research question or answer it directly.
+// Every question resolves to a validated LOOKUP PAIR — one entity term + one metric term.
 export const DECOMPOSE_SYSTEM = `You decide whether a research question should be split into sub-questions or answered directly from data.
-Return { atomic: boolean, rationale: string, entities: string[], metrics: string[], subQuestions?: [{ question, rationale?, entities: string[], metrics: string[] }] }.
+Return { atomic: boolean, rationale: string, entity: string, metric: string, subQuestions?: [{ question, rationale?, entity: string, metric: string }] }.
 - rationale: 1-2 plain sentences explaining WHY you chose atomic vs. split, and what the plan is. This is shown to
-  the user as your reasoning for this step — be specific and concrete (name the facets or the single comparison).
+  the user as your reasoning for this step — be specific and concrete (name the facets or the single pair).
 - Each sub-question MAY carry its own short rationale (why that facet matters to the overall question).
-- ATOMIC means the question can be answered by resolving entities and fetching data/metrics DIRECTLY —
-  even if it names several metrics across several entities. A single leaf fetches multiple metrics for
-  multiple entities in one pass, so a direct data comparison is NOT a reason to split.
-  (e.g. "Nvidia vs AMD data-center revenue" → atomic. "Compare Nvidia and AMD revenue growth and gross margins"
-   → STILL atomic: it's one direct data comparison, just with two metrics — fetch them, don't branch.)
-- SPLIT (atomic:false) when a good answer genuinely requires combining SEPARATE, self-standing
-  analyses that are DIFFERENT IDEAS — not merely different metrics of the same comparison. Test each candidate
-  sub-question: would it be a meaningful research question on its own, investigating a DISTINCT angle? If the
-  parts are just adjacent data points, keep them together — avoid redundant, adjacent sub-questions that
-  flood the canvas with the same surface.
+- A research question can target exactly ONE entity + ONE metric — that pair is its whole data budget.
+  ATOMIC means the question already IS one pair: one concrete subject, one measure
+  (e.g. "Nvidia's data-center revenue" → atomic: entity "NVIDIA Corporation", metric "Data Center Revenue").
+- SPLIT (atomic:false) whenever the question names MORE than one entity or more than one metric — every
+  comparison, every "versus", basically every "and": one sub-question per entity, per metric facet.
+  "Nvidia vs AMD data-center revenue" → 2 subs (one per company, same metric).
+  "Compare Nvidia and AMD revenue growth and gross margins" → 4 subs (entity × metric).
+  "How are energy and gasoline prices contributing to inflation?" → 2 subs (one per subject).
+  Also split broad multi-driver questions into their distinct facets, each facet reduced to a pair.
 - HOW STRONGLY to lean toward atomic vs. split depends on the LEVEL of this question — the caller appends a
-  per-level instruction below. Follow it: the top-level question is the most likely to warrant splitting;
-  deeper sub-questions lean progressively harder toward atomic.
-- A question that names 2+ SEPARATE SUBJECTS is a valid split — each subject becomes its own sub-question,
-  giving sharper, independent queries. (e.g. "How are energy and gasoline prices contributing to inflation?"
-  → "energy prices' contribution to inflation" + "gasoline prices' contribution to inflation" — two distinct
-  subjects.) This applies to separate SUBJECTS only, never to two metrics/facets of one subject.
-- When you DO decompose, sub-questions must be SPECIFIC drivers/facets, each a NARROW drill-down into a different aspect.
-  The overarching/broad view (the general graph) is fetched by the parent — do NOT create a sub-question for
-  the general/overview topic, and do NOT let two sub-questions cover the same surface.
+  per-level instruction below. Follow it.
+- Sub-questions must be SPECIFIC and non-overlapping. The overarching/broad view is fetched by the parent —
+  do NOT create a sub-question for the general/overview topic, and do NOT let two sub-questions cover the
+  same surface or reword the same pair.
   Example "what is affecting inflation" → GOOD subs: "energy/gas prices", "shelter & housing costs",
-  "wage growth", "food prices". BAD subs: "the overall inflation rate", "recent CPI trend" (that is the broad
-  view, owned by the parent), or two subs both about "prices generally".
-  Example "which chipmaker is the best AI investment" → GOOD subs: "revenue growth", "gross margin",
-  "data-center segment growth", "valuation multiples".
-- Return 2–{MAX} DISTINCT sub-questions, each independently answerable, with its own entities + metrics.
-- Also populate top-level entities + metrics for the broad view. Never exceed {MAX}.
-- ENTITIES vs METRICS — critical for query quality: \`entities\` are the concrete, searchable SUBJECTS Tako can
-  resolve (companies, tickers, commodities, indices, products, places). NEVER put the question's abstract
-  TARGET/outcome variable in \`entities\` (e.g. "inflation", "the economy", "the market", "GDP" when it is the
-  thing being explained). \`metrics\` are what to measure ABOUT those subjects. Example: "How are gasoline prices
-  contributing to inflation?" → entities ["gasoline prices"] (or "US retail gasoline price"), metrics
-  ["CPI contribution", "price change"] — do NOT list "inflation" as an entity. A query is later formed as
+  "wage growth", "food prices". BAD subs: "the overall inflation rate" (broad view, owned by the parent),
+  or two subs both about "prices generally".
+- Create ONE sub-question per pair the question needs — as few as 2, up to {MAX}. Never pad to reach a
+  number; a question with many real entity×metric pairs SHOULD spread wide (do not stop at 3).
+- Also populate the top-level entity + metric: the single most representative pair for the broad view.
+- ENTITY and METRIC are GRAPH LOOKUPS, and matching is by KEYWORD against node names and aliases, never
+  semantic: the entity term is searched ONLY in the graph's ENTITY namespace, the metric term ONLY in its
+  METRIC namespace — neither substitutes for the other. Word each term as the NAME of the node you expect
+  to exist, not as a description of what you want:
+  "how is Apple doing this year so far" → entity "Apple Inc.", metric "Stock Price" (plus sub-questions
+  for other facets like "Revenue").
+- \`entity\` is the concrete, searchable SUBJECT Tako can resolve (a company, ticker, commodity, index,
+  product, place). NEVER the question's abstract TARGET/outcome variable (e.g. "inflation", "the economy",
+  "the market", "GDP" when it is the thing being explained) — and never a series/price/rate (those are
+  metrics; the entity for a macro series is its geography, e.g. "United States"). For companies use the
+  FORMAL registered name — "Apple Inc.", "NVIDIA Corporation", "Advanced Micro Devices" — never the bare
+  colloquial word: company nodes are named formally, so a bare "Apple" keyword-ranks "Apples" (the fruit)
+  and Apple Valley, CA above Apple Inc.
+- \`metric\` is what to measure ABOUT that subject — a SHORT canonical measure name likely to BE a real
+  metric name or alias ("Revenue", "Gross Margin", "Unemployment Rate", "Stock Price", "Gasoline Price"),
+  NEVER an analytical phrase: "year-to-date stock performance" keyword-matches junk ("Real GDP Percent
+  Change (Year-over-Year)" via its "year-over-year" alias) instead of anything about stocks.
+  Example: "How are gasoline prices contributing to inflation?" → entity "United States", metric
+  "Gasoline Price" — do NOT put "inflation" or "gasoline prices" in \`entity\`. A query is later formed as
   "\${entity} \${metric}", so a mis-placed target produces nonsense like "inflation contribution to inflation".`;
-
-// Filter the graph's related metrics to the FEW DISTINCT ones that answer THIS
-// question, so each sub-question issues 1-3 independent searches (no similar/general).
-export const METRIC_FILTER_SYSTEM = `You pick the FEWEST DISTINCT Tako metrics needed to answer the QUESTION for one entity.
-You are given the ENTITY and its RELATED_METRICS (the metrics Tako actually has, each with name, aliases, and a description).
-Return { keep: string[] } — at most 3 metric names, chosen from RELATED_METRICS verbatim.
-Rules:
-- Each kept metric must be a DISTINCT concept — a different thing being measured. Use the descriptions to tell them apart.
-- NEVER keep two variants of the same underlying measure (e.g. "Revenue" vs "Total Revenue" vs "Revenue (Quarterly)"
-  vs "Revenue (Annual)", or a total vs a segment of it). Pick the single best-fitting one for the question.
-- Keep only what the question actually needs; prefer specific metrics over broad "overview"/"ratios" summaries.
-- Return the fewest that cover the question (often 1-2). If none fit, return an empty array.`;
-
-// Compose subject+metric queries from the series a graph METRIC search confirmed. A bare
-// metric name is never a valid query — it has no subject and Tako can't target it.
-export const STANDALONE_COMPOSE_SYSTEM = `You write Tako /v3/search queries that combine a SUBJECT with a graph-confirmed metric.
-You are given the SUB_QUESTION, KNOWN_SUBJECTS (entities resolved/decomposed for this sub-question), and
-GRAPH_METRICS (series the Tako graph actually has: name, aliases, description).
-Return { queries: string[] } — at most 3.
-Rules:
-- Use ONLY metrics that answer the SUB_QUESTION. GRAPH_METRICS contains fuzzy matches about unrelated
-  subjects — ignore them entirely.
-- EVERY query must name BOTH a concrete subject AND the measure — NEVER a bare metric name alone.
-  Company metric → "<company> <metric>" (e.g. "Nvidia Gross Margin"). Macro/country-level series → prefix the
-  geography the question implies (e.g. "US CPI Shelter", "US shelter inflation rate").
-- Prefer the metric's canonical name or a close alias so the search lands on the exact series.
-- Each query is a DISTINCT angle — no paraphrases of another query. If nothing fits, return [].`;
 
 // Turn a leaf/branch's evidence into a structured result the final layer reconciles.
 export const BRANCH_RESULT_SYSTEM = `You distill ONE research sub-question's evidence into a structured result.
@@ -184,11 +183,15 @@ inline (e.g. "per Reuters"). No citation markers.`;
 export const SEARCH_LEAF_COMPOSE_SYSTEM = `You write Tako /v3/search queries that answer ONE specific sub-question, working from the question text ALONE (no knowledge graph).
 - Output 1-3 queries. Each must be a DISTINCT angle on the sub-question (a different metric, facet, or entity) — never near-duplicates.
 - Write each as a short search-style noun phrase a data search engine would match: entity + measure + qualifier (e.g. "US gasoline prices 2024", "Nvidia data center revenue"). NOT a full sentence, no question marks.
+- Each query names exactly ONE entity — Tako search can't handle multi-entity queries; never "X vs Y" or
+  "compare X and Y". For a comparison, write one query per entity on the same measure.
 - If the sub-question is a single simple ask, ONE query is correct — do not pad to three.
 Return { queries }.`;
 
 export const SEARCH_BROAD_COMPOSE_SYSTEM = `You write 1-2 Tako /v3/search queries for the BROAD/overview view of the user's overall question, working from the question text ALONE (no knowledge graph).
 - 1-2 queries max, each capturing a headline/overview measure for the whole question.
+- Each query names exactly ONE entity/subject — Tako search can't handle multi-entity queries. For a
+  comparison, use both slots: one query per subject, same measure.
 - Short search-style noun phrases, not sentences; no near-duplicates.
 Return { queries }.`;
 

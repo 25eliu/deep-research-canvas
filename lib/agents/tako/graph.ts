@@ -50,11 +50,17 @@ export async function graphSearch(
 
 export async function graphRelated(
   nodeId: string,
-  opts: { relationType: "entity" | "metric"; q: string; limit?: number },
+  opts: { relationType: "entity" | "metric"; q?: string; limit?: number },
 ): Promise<GraphItem[]> {
   const p = new URLSearchParams({
-    node_id: nodeId, relation_type: opts.relationType, q: opts.q, limit: String(opts.limit ?? 6),
+    node_id: nodeId, relation_type: opts.relationType, limit: String(opts.limit ?? 6),
   });
+  // `q` relevance-filters the related items against their NAMES. Only append it when
+  // non-empty: a metric fetch with no `q` returns the entity's full (bounded) menu, which
+  // is what we want as a fallback. (Entity relations should still pass `q` — unfiltered
+  // they return tens of thousands — but that's the caller's choice.)
+  const q = opts.q?.trim();
+  if (q) p.set("q", q);
   const data = await get(`/related?${p.toString()}`);
   return Array.isArray(data?.relation?.items) ? data.relation.items : [];
 }

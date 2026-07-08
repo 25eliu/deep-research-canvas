@@ -3,15 +3,17 @@ import { useId, useState } from "react";
 import type { TraceNodeView } from "@/lib/trace";
 import { IconChevronRight } from "./icons";
 import TakoCallRow from "./TakoCallRow";
+import GraphCallRow from "./GraphCallRow";
 
-// One resolved entity from the graph: name is a disclosure that reveals the related
-// metrics Tako actually has for it.
-function GraphEntity({ entity, related }: { entity: string; related: string[] }) {
+// One "graph resolved" row: a resolved entity (disclosure reveals the related metrics
+// Tako has for it) or, for kind:"metric", the standalone series the metric-typed
+// graph search surfaced for this sub-question's terms.
+function GraphEntity({ entity, related, kind }: { entity: string; related: string[]; kind?: "entity" | "metric" }) {
   const [open, setOpen] = useState(false);
   const panelId = useId();
   const has = related.length > 0;
   return (
-    <div className="graph-entity">
+    <div className={`graph-entity${kind === "metric" ? " metric" : ""}`}>
       <button
         type="button"
         className="graph-entity-row"
@@ -71,10 +73,21 @@ export default function TraceNode({ node, defaultOpen }: { node: TraceNodeView; 
             </div>
           )}
 
-          {node.graph.length > 0 && (
+          {(node.graph.length > 0 || node.graphCalls.length > 0) && (
             <div className="trace-graph">
-              <div className="trace-graph-label">graph resolved</div>
-              {node.graph.map((g) => <GraphEntity key={g.entity} entity={g.entity} related={g.related} />)}
+              <div className="trace-graph-label">
+                graph resolved
+                {node.graphCalls.length > 0 && (
+                  <> · {node.graphCalls.length} call{node.graphCalls.length === 1 ? "" : "s"}{node.graphMs != null ? ` · ${node.graphMs}ms` : ""}</>
+                )}
+              </div>
+              {node.graph.map((g) => <GraphEntity key={g.entity} entity={g.entity} related={g.related} kind={g.kind} />)}
+              {node.graphCalls.length > 0 && (
+                <>
+                  <div className="trace-graph-label graph-calls-label">graph calls</div>
+                  {node.graphCalls.map((c, i) => <GraphCallRow key={`gc-${i}`} call={c} />)}
+                </>
+              )}
             </div>
           )}
 

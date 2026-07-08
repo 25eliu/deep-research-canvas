@@ -12,11 +12,17 @@ vi.mock("../../llm", () => ({
   generateStructured: vi.fn(async (opts: any) => {
     if (opts.label === "decompose") {
       const q = (String(opts.prompt).match(/RESEARCH_QUESTION:\s*(.*)/)?.[1] || "").trim();
-      // Default: atomic with NO entity override, so a sub-question keeps the entities
+      // Default: atomic with NO pair override, so a sub-question keeps the entity/metric
       // its parent assigned it (a real decompose for "amd revenue" would return AMD).
-      return h.plans[q] ?? { atomic: true, rationale: "direct", entities: [], metrics: [] };
+      return h.plans[q] ?? { atomic: true, rationale: "direct" };
     }
-    if (opts.label === "metric-filter") return { keep: h.related }; // keep all available metrics
+    if (opts.label === "grounded-compose") {
+      // Echo the resolved entity paired with every available metric (worst case: the
+      // LLM keeps them all) — each cites a listed metric so the guard keeps them.
+      const p = String(opts.prompt);
+      const ent = p.includes("Nvidia") ? "Nvidia" : p.includes("AMD") ? "AMD" : null;
+      return { queries: ent ? h.related.map((m: string) => `${ent} ${m}`) : [] };
+    }
     if (opts.label === "compose") return { queries: h.composeFallback };
     if (opts.label === "broad-compose") return { queries: ["macro overview"] };
     if (opts.label === "answer-report") return h.report;
@@ -30,7 +36,10 @@ vi.mock("../../llm", () => ({
 }));
 
 vi.mock("./graph", () => ({
-  graphSearch: vi.fn(async (name: string) => [{ id: `${name}-id`, name, type: "entity" }]),
+  // Type-aware: metric discovery finds nothing here (strategy.test.ts covers it),
+  // entity searches echo the query back as the resolved node.
+  graphSearch: vi.fn(async (name: string, opts: any) =>
+    opts?.types === "metric" ? [] : [{ id: `${name}-id`, name, type: "entity" }]),
   graphRelated: vi.fn(async () => h.related.map((name, i) => ({ id: `m${i}`, name, aliases: [] }))),
 }));
 
@@ -55,11 +64,12 @@ const req = {
   history: [],
 };
 
+// The canonical split-per-entity case: a comparison decomposes into one pair per company.
 const twoBranchPlan = {
-  atomic: false, rationale: "Split into per-company revenue to compare them.", entities: ["Nvidia", "AMD"], metrics: ["Revenue"],
+  atomic: false, rationale: "Split into per-company revenue to compare them.", entity: "Nvidia", metric: "Revenue",
   subQuestions: [
-    { question: "nvidia revenue", entities: ["Nvidia"], metrics: ["Revenue"] },
-    { question: "amd revenue", entities: ["AMD"], metrics: ["Revenue"] },
+    { question: "nvidia revenue", entity: "Nvidia", metric: "Revenue" },
+    { question: "amd revenue", entity: "AMD", metric: "Revenue" },
   ],
 };
 
@@ -134,7 +144,7 @@ describe("runTakoInitial — recursive research tree", () => {
   });
 
   it("caps each sub-question to ≤3 independent searches, dropping near-duplicate metrics", async () => {
-    h.plans["compare Nvidia and AMD"] = { atomic: true, rationale: "direct", entities: ["Nvidia"], metrics: ["Revenue"] };
+    h.plans["compare Nvidia and AMD"] = { atomic: true, rationale: "direct", entity: "Nvidia", metric: "Revenue" };
     // Graph returns near-duplicate revenue variants + one distinct metric; the filter echoes
     // them (worst case) and the diversify backstop must collapse the variants.
     h.related = ["Revenue", "Total Revenue", "Gross Margin"];
@@ -147,8 +157,27 @@ describe("runTakoInitial — recursive research tree", () => {
     expect(grounded).not.toContain("Nvidia Total Revenue"); // near-duplicate dropped
   });
 
+  it("a sub-question that re-splits into ITSELF + an invented sibling stays a leaf", async () => {
+    h.plans["compare Nvidia and AMD"] = twoBranchPlan;
+    // Pathological depth-1 decompose: "nvidia revenue" re-splits into itself + a sibling
+    // it does not name. The self-restating sub is dropped → 1 genuine sub → leaf.
+    h.plans["nvidia revenue"] = {
+      atomic: false, rationale: "bad re-split", entity: "Nvidia", metric: "Revenue",
+      subQuestions: [
+        { question: "nvidia revenue", entity: "Nvidia", metric: "Revenue" },
+        { question: "amd revenue", entity: "AMD", metric: "Revenue" },
+      ],
+    };
+    const result = await runTakoInitial(req, () => {});
+    // Exactly the 2 planned research nodes — no grandchildren from the bad re-split.
+    const research = result.nodeOps.filter((o: any) => o.op === "add_node" && o.node.role === "research");
+    expect(research.length).toBe(2);
+    const nvidiaLeaf = result.trace.tree?.find((n) => n.question === "nvidia revenue");
+    expect(nvidiaLeaf?.kind).toBe("leaf");
+  });
+
   it("an atomic query produces a single synthesis block, no research nodes", async () => {
-    h.plans["compare Nvidia and AMD"] = { atomic: true, rationale: "direct", entities: ["Nvidia"], metrics: ["Revenue"] };
+    h.plans["compare Nvidia and AMD"] = { atomic: true, rationale: "direct", entity: "Nvidia", metric: "Revenue" };
     const result = await runTakoInitial(req, () => {});
     expect(result.nodeOps.filter((o: any) => o.op === "add_node" && o.node.role === "research").length).toBe(0);
     expect(result.nodeOps.filter((o: any) => o.op === "add_node" && o.node.role === "synthesis").length).toBe(1);
@@ -159,10 +188,10 @@ describe("runTakoInitial — recursive research tree", () => {
   it("reuses one card node across branches, linking the duplicate with a supports edge", async () => {
     // Both sub-questions resolve to the SAME entity/metric → same card returned twice.
     h.plans["compare Nvidia and AMD"] = {
-      atomic: false, rationale: "split", entities: ["Nvidia"], metrics: ["Revenue"],
+      atomic: false, rationale: "split", entity: "Nvidia", metric: "Revenue",
       subQuestions: [
-        { question: "nvidia revenue growth", entities: ["Nvidia"], metrics: ["Revenue"] },
-        { question: "nvidia revenue scale", entities: ["Nvidia"], metrics: ["Revenue"] },
+        { question: "nvidia revenue growth", entity: "Nvidia", metric: "Revenue" },
+        { question: "nvidia revenue scale", entity: "Nvidia", metric: "Revenue" },
       ],
     };
     const result = await runTakoInitial(req, () => {});
@@ -177,7 +206,7 @@ describe("runTakoInitial — recursive research tree", () => {
   });
 
   it("cites web results as per-answer sources (see-sources), NOT as canvas nodes", async () => {
-    h.plans["compare Nvidia and AMD"] = { atomic: true, rationale: "direct", entities: ["Nvidia"], metrics: ["web coverage"] };
+    h.plans["compare Nvidia and AMD"] = { atomic: true, rationale: "direct", entity: "Nvidia", metric: "web coverage" };
     h.related = ["web coverage"]; // grounded query becomes "Nvidia web coverage" → a web card
 
     const result = await runTakoInitial(req, () => {});
@@ -191,7 +220,7 @@ describe("runTakoInitial — recursive research tree", () => {
   });
 
   it("no findings → no synth node → chat fallback", async () => {
-    h.plans["compare Nvidia and AMD"] = { atomic: true, rationale: "direct", entities: ["Nvidia"], metrics: [] };
+    h.plans["compare Nvidia and AMD"] = { atomic: true, rationale: "direct", entity: "Nvidia", metric: "" };
     h.related = []; // no graph metrics
     h.composeFallback = []; // and no fallback queries → nothing fetched
     const result = await runTakoInitial(req, () => {});

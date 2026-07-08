@@ -35,6 +35,7 @@ export interface TraceNodeView {
   queries: string[];
   calls: TakoCallRecord[];
   graphCalls: GraphCallRecord[]; // raw graph API calls (params + response) for drill-down
+  graphMs?: number; // wall-clock of the node's graph phase
   children: TraceNodeView[];
   synthesizing?: boolean; // live only: synthesis in progress for this node
 }
@@ -89,6 +90,7 @@ export function buildTree(flat: TraceTreeNode[] | undefined): TraceNodeView[] {
     queries: n.queries ?? [],
     calls: n.calls ?? [],
     graphCalls: n.graphCalls ?? [],
+    graphMs: n.graphMs,
     children: n.children.map((id) => byId.get(id)).filter(Boolean).map((c) => toView(c!)),
   });
 
