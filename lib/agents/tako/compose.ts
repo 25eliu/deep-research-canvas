@@ -27,6 +27,27 @@ export function numericMagnitude(s: string): number | null {
   return n;
 }
 
+const CSV_FIGURES_CAP = 500; // bound memory on very long series
+
+// Every numeric cell of a fetched card CSV becomes an allowed figure, so real
+// chart points the composer copies from card contents pass validation.
+export function csvFigures(csv: string, label: string): GatheredFigure[] {
+  const lines = csv.split("\n").filter(Boolean);
+  if (lines.length < 2) return [];
+  const header = lines[0].split(",");
+  const out: GatheredFigure[] = [];
+  for (const line of lines.slice(1)) {
+    const cells = line.split(",");
+    for (let i = 1; i < cells.length; i++) {
+      const v = cells[i]?.trim();
+      if (!v || !/\d/.test(v)) continue;
+      out.push({ label: `${label} ${header[i]?.trim() ?? ""}`.trim(), value: v });
+      if (out.length >= CSV_FIGURES_CAP) return out;
+    }
+  }
+  return out;
+}
+
 function allowedSets(figures: GatheredFigure[]): { strings: Set<string>; mags: number[] } {
   const strings = new Set<string>();
   const mags: number[] = [];
@@ -50,7 +71,7 @@ function traceable(value: string, allowed: { strings: Set<string>; mags: number[
 }
 
 // Drop untraceable numbers from a block; return null if the block is emptied.
-function validateBlock(block: AnswerBlock, allowed: { strings: Set<string>; mags: number[] }, drop: (why: string) => void): AnswerBlock | null {
+export function validateBlock(block: AnswerBlock, allowed: { strings: Set<string>; mags: number[] }, drop: (why: string) => void): AnswerBlock | null {
   switch (block.kind) {
     case "prose":
       return block; // reasoning; numbers were drawn from the given figures per prompt
@@ -75,6 +96,62 @@ function validateBlock(block: AnswerBlock, allowed: { strings: Set<string>; mags
         }) }))
         .filter((s) => s.points.length > 0);
       return series.length ? { ...block, chartSpec: { ...block.chartSpec, series } } : null;
+    }
+    case "comparison": {
+      const series = block.series
+        .map((s) => ({ ...s, points: s.points.filter((p) => {
+          const ok = traceable(String(p.y), allowed);
+          if (!ok) drop(`comparison point ${s.label}:${p.y}`);
+          return ok;
+        }) }))
+        .filter((s) => s.points.length > 0);
+      return series.length ? { ...block, series } : null;
+    }
+    case "leaderboard": {
+      const rows = block.rows
+        .filter((r) => {
+          const ok = traceable(r.value, allowed);
+          if (!ok) drop(`leaderboard row "${r.entity}: ${r.value}"`);
+          return ok;
+        })
+        .map((r) => (r.detail?.stats
+          ? { ...r, detail: { ...r.detail, stats: r.detail.stats.filter((s) => {
+              const ok = traceable(s.value, allowed);
+              if (!ok) drop(`leaderboard stat "${s.label}: ${s.value}"`);
+              return ok;
+            }) } }
+          : r));
+      return rows.length ? { ...block, rows } : null;
+    }
+    case "sections": {
+      const sections = block.sections.map((s) => {
+        let next = s;
+        if (s.figure && !traceable(s.figure.value, allowed)) {
+          drop(`section figure "${s.figure.label}: ${s.figure.value}"`);
+          const { figure: _f, ...rest } = next;
+          next = rest;
+        }
+        if (next.chartSpec) {
+          const series = next.chartSpec.series
+            .map((se) => ({ ...se, points: se.points.filter((p) => traceable(String(p.y), allowed)) }))
+            .filter((se) => se.points.length > 0);
+          const { chartSpec: _c, ...rest } = next;
+          next = series.length ? { ...rest, chartSpec: { ...next.chartSpec, series } } : rest;
+        }
+        return next;
+      });
+      return { ...block, sections };
+    }
+    case "timeline": {
+      const events = block.events.map((e) => {
+        if (e.value && !traceable(e.value, allowed)) {
+          drop(`timeline value "${e.title}: ${e.value}"`);
+          const { value: _v, ...rest } = e;
+          return rest;
+        }
+        return e;
+      });
+      return { ...block, events };
     }
     default:
       // New block kinds (comparison/leaderboard/sections/timeline) get explicit
