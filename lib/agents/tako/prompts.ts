@@ -1,16 +1,5 @@
 import { ROUTER } from "../shared/router";
 
-export const BREAKDOWN_SYSTEM = `You break a research question into parts for the Tako graph.
-Return { entities: string[], metrics: string[], subtypes?: {name:type} }.
-- entities = the concrete things to compare (companies, countries, indices). Resolve a cohort ("top 5 chip makers") into concrete names.
-  For companies use the FORMAL registered name ("Apple Inc.", not "Apple") — graph lookup is keyword-based and company nodes are named formally.
-- metrics = the measures the question needs, as SHORT canonical metric names likely to match a real metric
-  name/alias ("Revenue", "P/E", "Unemployment Rate") — matching is keyword on names/aliases, so never
-  analytical phrases like "year-to-date stock performance". Entity terms are looked up ONLY in the entity
-  namespace and metric terms ONLY in the metric namespace — classify each term for the namespace it belongs to.
-- subtypes = disambiguation for ambiguous entity names (e.g. {"Georgia":"Countries"}).
-Prefer a handful, not an exhaustive list.`;
-
 // The leaf's PRIMARY query composer. The availability list (RESOLVED) is deterministic —
 // parsed verbatim from the graph API responses — the LLM only PICKS from it and WORDS the
 // queries. A deterministic guard afterwards drops any query citing nothing from the list.
@@ -71,7 +60,19 @@ Return canvasOps, a <=2 sentence narration, and sideReply (usually null on NEW_B
 // Recursive decompose: decide whether to split a research question or answer it directly.
 // Every question resolves to a validated LOOKUP PAIR — one entity term + one metric term.
 export const DECOMPOSE_SYSTEM = `You decide whether a research question should be split into sub-questions or answered directly from data.
-Return { atomic: boolean, rationale: string, entity: string, metric: string, subQuestions?: [{ question, rationale?, entity: string, metric: string }] }.
+Return { atomic: boolean, rationale: string, entity: string, metric: string, cohort?: string, subQuestions?: [{ question, rationale?, entity: string, metric: string }] }.
+- An entity must be CONCRETE, individually nameable (a specific company, country, commodity, index). An entity
+  CLASS or category ("AI companies", "emerging infrastructure startups", "chip makers") is NOT an entity: when
+  the question's subject is a class, set \`cohort\` to that class phrase, return atomic:false with NO
+  subQuestions, and STOP — the caller resolves the class into real member names from grounded data and calls
+  you again with a COHORT_MEMBERS list.
+- Sub-questions are ONE-ENTITY focused: each investigates one concrete entity. Never emit class-wide metric
+  subs — never "rank <class> by <metric>" or "compare <class> on <metric>" ("rank AI companies by employee
+  count" is NOT a researchable sub-question; ranking across entities is the final report's job, fed by
+  per-entity results).
+- When the prompt contains a COHORT_MEMBERS list, this IS the second pass: every sub-question names exactly
+  ONE member from that list (copy the name verbatim as its \`entity\`) paired with the question's most
+  decision-relevant metric; do not re-introduce the class and do not set \`cohort\` again.
 - rationale: 1-2 plain sentences explaining WHY you chose atomic vs. split, and what the plan is. This is shown to
   the user as your reasoning for this step — be specific and concrete (name the facets or the single pair).
 - Each sub-question MAY carry its own short rationale (why that facet matters to the overall question).
@@ -250,6 +251,21 @@ CONVERSATION SO FAR into account for what "this"/"that"/"them" refer to.
 - Prefer the board's own data. If a GROUNDED_ANSWER is provided, it is fresh Tako data fetched this turn — weave it in.
 - Be concise and conversational: 1-3 short paragraphs, no headings. Light markdown only (**bold** a key figure, "- " bullets for 3+ items).
 - Use ONLY facts present in BOARD CONTEXT / GROUNDED_ANSWER. Never invent a number or source. Never mention missing data.`;
+
+// Resolve an entity CLASS ("emerging infrastructure startups") into concrete member
+// names, grounded EXCLUSIVELY in a real tako answer (prose + card titles) — the
+// decompose second pass then produces one sub-question per member.
+export const COHORT_RESOLVE_SYSTEM = `You extract the concrete member entities of a COHORT (a class/category of entities) from grounded data.
+You are given the user's QUESTION, the COHORT class phrase, GROUNDED_ANSWER (prose from Tako's answer API,
+citing real data), and CARD_TITLES (titles of the data cards behind that answer).
+Return { entities: string[], rationale: string } — at most 6 members.
+- Every member must appear in GROUNDED_ANSWER or CARD_TITLES. NEVER invent, recall from memory, or "round out"
+  the list — a member not present in the grounding does not exist for this task.
+- Use the FORMAL registered name for companies ("NVIDIA Corporation", not "Nvidia") when the grounding shows
+  it; otherwise the exact name as the grounding spells it.
+- Pick the members most relevant to the QUESTION's intent (e.g. for "could become billion-dollar companies",
+  prefer the emerging names over incumbents the answer mentions in passing).
+- rationale: one sentence on why these members, citing where they came from.`;
 
 export const GAP_SYSTEM = `You are the lead analyst reviewing gathered evidence BEFORE the final report is written.
 You are given the user's QUESTION and the EVIDENCE digest: subAnswers (each sub-question's one-line claim),

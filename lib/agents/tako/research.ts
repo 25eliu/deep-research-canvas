@@ -7,13 +7,14 @@
 import type { TakoCallRecord, GraphCallRecord } from "../shared/types";
 import { generateStructured, streamAnswer } from "../../llm";
 import { ctxBlock } from "../shared/ctx";
-import { zResearchPlan } from "../shared/schemas";
+import { zResearchPlan, zCohortMembers } from "../shared/schemas";
+import { takoAnswer } from "../../tako";
 import type { Finding } from "./findings";
 import {
-  DECOMPOSE_SYSTEM, BRANCH_SYNTH_SYSTEM,
+  DECOMPOSE_SYSTEM, BRANCH_SYNTH_SYSTEM, COHORT_RESOLVE_SYSTEM,
 } from "./prompts";
 import {
-  SYNTH_ID, synthNode, researchNode, derivedEdge, toNodeSources, extractFigures,
+  SYNTH_ID, synthNode, researchNode, derivedEdge, feedsEdge, toNodeSources, extractFigures,
   runSearches, firstSentence, researchLeaf, uniqueResearchId,
   type ResearchCtx, type ResearchResult,
 } from "./flow";
@@ -64,6 +65,52 @@ function decomposePrompt(maxChildren: number, depth: number): string {
   return `${base}\n${depthLean(depth)}`;
 }
 
+const COHORT_MEMBER_CAP = 6;
+const COHORT_ANSWER_EXCERPT = 3000; // chars of the tako answer prose handed to the resolver
+
+// Resolve an entity CLASS into concrete member names, grounded by a real tako answer
+// (/v1/answer prose + cards). The answer's cards also land on the board as broad
+// evidence for the synth node. Returns null on ANY failure — the caller proceeds
+// with the ungrounded plan; cohort resolution may never kill the turn.
+async function resolveCohort(ctx: ResearchCtx, question: string, cohort: string): Promise<string[] | null> {
+  ctx.emit?.({ type: "trace", stage: `resolving cohort: ${cohort.slice(0, 50)}` });
+  try {
+    const t0 = Date.now();
+    const { answer, cards } = await takoAnswer(question, { effort: "fast" });
+    const call: TakoCallRecord = {
+      callId: `${SYNTH_ID}:answer:${ctx.calls.length}`, nodeId: SYNTH_ID,
+      query: question, endpoint: "/v1/answer", effort: "fast", ms: Date.now() - t0,
+      cards: cards.map((c) => ({ id: c.cardId!, title: c.title, source: c.source, url: c.webpageUrl || c.embedUrl })),
+    };
+    ctx.calls.push(call);
+    ctx.emit?.({ type: "tako_call", call });
+
+    // The answer's cards are real grounded evidence — node them onto the broad view.
+    for (const c of cards) {
+      const f = ctx.ledger.add(c, SYNTH_ID);
+      if (f && f.kind === "data_card") {
+        ctx.push([{ op: "add_node", node: ctx.ledger.toNode(f) }, feedsEdge(f.nodeId, SYNTH_ID)]);
+      }
+    }
+    if (!answer && cards.length === 0) {
+      ctx.notes.push(`cohort resolution found no grounding for "${cohort}"`);
+      return null;
+    }
+
+    const members = await generateStructured({
+      provider: OPENAI, system: COHORT_RESOLVE_SYSTEM,
+      prompt: `${ctxBlock(ctx.req)}\n\nQUESTION: ${question}\n\nCOHORT: ${cohort}\n\nGROUNDED_ANSWER: ${answer.slice(0, COHORT_ANSWER_EXCERPT)}\n\nCARD_TITLES: ${JSON.stringify(cards.map((c) => c.title))}`,
+      schema: zCohortMembers, label: "cohort-resolve",
+    });
+    const names = members.entities.slice(0, COHORT_MEMBER_CAP);
+    ctx.notes.push(`cohort "${cohort}" resolved to: ${names.join(", ")} — ${members.rationale}`);
+    return names;
+  } catch (e: unknown) {
+    ctx.notes.push(`cohort resolution failed — ${errorMessage(e)}`);
+    return null;
+  }
+}
+
 interface ResearchOpts { root: boolean; entities?: string[]; metrics?: string[] }
 
 export async function research(question: string, depth: number, ctx: ResearchCtx, opts: ResearchOpts): Promise<ResearchResult> {
@@ -84,10 +131,23 @@ export async function research(question: string, depth: number, ctx: ResearchCtx
     const maxChildren = MAX_CHILDREN;
     const t = Date.now();
     try {
-      const plan = await generateStructured({
+      let plan = await generateStructured({
         provider: OPENAI, system: decomposePrompt(maxChildren, depth),
         prompt: `${ctxBlock(ctx.req)}\n\nRESEARCH_QUESTION: ${question}`, schema: zResearchPlan, label: "decompose",
       });
+      // Class-of-entities question ("emerging infrastructure startups"): resolve REAL
+      // members from a grounded tako answer, then decompose again per member. Root-only,
+      // gated by the same takoAnswerEnabled kill-switch as the follow-up path.
+      if (root && plan.cohort && ctx.req.takoAnswerEnabled !== false) {
+        const members = await resolveCohort(ctx, question, plan.cohort);
+        if (members?.length) {
+          plan = await generateStructured({
+            provider: OPENAI, system: decomposePrompt(maxChildren, depth),
+            prompt: `${ctxBlock(ctx.req)}\n\nRESEARCH_QUESTION: ${question}\n\nCOHORT_MEMBERS: ${JSON.stringify(members)}`,
+            schema: zResearchPlan, label: "decompose",
+          });
+        }
+      }
       atomic = plan.atomic || !plan.subQuestions?.length;
       // Deterministic re-split brake: a sub-question that merely restates THIS question
       // (the model sometimes re-splits a sub-question into itself + an invented sibling)

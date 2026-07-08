@@ -3,6 +3,7 @@ import { depthLean } from "./research";
 import {
   COMPOSE_SYSTEM, BROAD_COMPOSE_SYSTEM, DECOMPOSE_SYSTEM,
   SEARCH_LEAF_COMPOSE_SYSTEM, SEARCH_BROAD_COMPOSE_SYSTEM,
+  COHORT_RESOLVE_SYSTEM,
 } from "./prompts";
 
 // The atomic-vs-split lean must decay with depth: the top-level question leans hard toward
@@ -60,6 +61,23 @@ describe("lookup-pair rules in prompts", () => {
     expect(COMPOSE_SYSTEM).toContain("sharing a keyword is NOT relevance");
     expect(COMPOSE_SYSTEM).toContain("AI Adoption Rate");
     expect(COMPOSE_SYSTEM).toContain("GLP-1");
+  });
+
+  // Cohort-grounded decomposition: class questions ("emerging infrastructure startups")
+  // must not decompose into class-wide metric subs ("rank AI companies by employee count");
+  // they signal `cohort`, real members get resolved from a grounded tako answer, and the
+  // second pass produces ONE-member sub-questions.
+  it("decompose treats an entity class as a cohort, never a sub-question subject", () => {
+    expect(DECOMPOSE_SYSTEM).toContain("cohort");
+    expect(DECOMPOSE_SYSTEM).toContain("CONCRETE, individually nameable");
+    expect(DECOMPOSE_SYSTEM).toContain("COHORT_MEMBERS");
+    expect(DECOMPOSE_SYSTEM).toContain("never \"rank");
+  });
+
+  it("cohort resolver extracts members from the grounded answer only", () => {
+    expect(COHORT_RESOLVE_SYSTEM).toContain("GROUNDED_ANSWER");
+    expect(COHORT_RESOLVE_SYSTEM).toContain("NEVER invent");
+    expect(COHORT_RESOLVE_SYSTEM).toContain("at most 6");
   });
 
   it("decompose targets one pair per question and splits any versus/and", () => {

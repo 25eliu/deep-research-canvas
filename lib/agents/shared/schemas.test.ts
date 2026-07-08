@@ -101,3 +101,20 @@ describe("zCanvasNode.gapFill", () => {
     expect(zCanvasNode.safeParse(n).success).toBe(true);
   });
 });
+
+import { zCohortMembers } from "./schemas";
+
+// Cohort-grounded decomposition: a class-of-entities question ("emerging infrastructure
+// startups") first resolves REAL members via tako answer; the plan signals it via `cohort`.
+describe("cohort resolution schemas", () => {
+  const base = { atomic: false, rationale: "class question", entity: "Infrastructure startups", metric: "Funding" };
+  it("zResearchPlan accepts an optional cohort class phrase (and remains valid without it)", () => {
+    expect(zResearchPlan.safeParse({ ...base, cohort: "emerging infrastructure startups" }).success).toBe(true);
+    expect(zResearchPlan.safeParse(base).success).toBe(true);
+  });
+  it("zCohortMembers requires at least one non-empty member name", () => {
+    expect(zCohortMembers.safeParse({ entities: ["Stategraph", "Runplane"], rationale: "named in the grounded answer" }).success).toBe(true);
+    expect(zCohortMembers.safeParse({ entities: [], rationale: "r" }).success).toBe(false);
+    expect(zCohortMembers.safeParse({ entities: [""], rationale: "r" }).success).toBe(false);
+  });
+});

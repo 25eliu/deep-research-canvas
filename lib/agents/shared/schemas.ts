@@ -15,12 +15,17 @@ export const zAgentBody = z.object({
 export type AgentBody = z.infer<typeof zAgentBody>;
 
 // Tako pipeline sub-steps
-export const zBreakdown = z.object({
-  entities: z.array(z.string()),
-  metrics: z.array(z.string()),
-  subtypes: z.record(z.string()).optional(),
-});
 export const zQueries = z.object({ queries: z.array(z.string()) });
+
+// Cohort resolution: a class-of-entities question ("emerging infrastructure startups")
+// is answered per-MEMBER, never per-class. The members come ONLY from a grounded tako
+// answer (never invented); min(1) so an empty extraction fails validation and the
+// caller falls back to the ungrounded plan instead of proceeding with nobody.
+export const zCohortMembers = z.object({
+  entities: z.array(z.string().min(1)).min(1),
+  rationale: z.string(),
+});
+export type CohortMembers = z.infer<typeof zCohortMembers>;
 
 // Web-source usefulness filter: the indices of the candidates worth keeping.
 export const zWebFilter = z.object({ useful: z.array(z.number()) });
@@ -59,6 +64,10 @@ export const zResearchPlan = z.object({
   // The lookup pair for THIS question (leaf fetch / broad-view grounding).
   entity: z.string().min(1),
   metric: z.string().min(1),
+  // Set when the question's subject is a CLASS of entities ("emerging infrastructure
+  // startups") rather than a nameable one — the caller resolves real members via a
+  // grounded tako answer, then re-decomposes per member (root-level only).
+  cohort: z.string().optional(),
   subQuestions: z.array(z.object({
     question: z.string(),
     rationale: z.string().optional(), // why this facet matters (optional per-sub reasoning)
