@@ -644,6 +644,7 @@ button.leaderboard-row:hover { background: rgba(0, 0, 0, 0.03); }
 .factor-figure { font-weight: 400; font-size: 12px; color: var(--muted, #667); white-space: nowrap; }
 .factor-figure strong { font-size: 13.5px; color: inherit; font-variant-numeric: tabular-nums; }
 .factor-figure-label { opacity: 0.8; }
+.factor-delta { font-size: 11.5px; font-variant-numeric: tabular-nums; }
 .factor-body { padding: 0 12px 10px 32px; font-size: 13px; }
 
 /* ---- report: timeline ---- */

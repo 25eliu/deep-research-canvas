@@ -36,4 +36,16 @@ describe("ComparisonChart", () => {
     expect(container.querySelectorAll("polyline")).toHaveLength(0);
     expect(container.querySelectorAll("rect").length).toBeGreaterThan(0);
   });
+  it("sorts a numeric/date-like x-domain instead of keeping first-appearance (interleaved series) order", () => {
+    const interleaved = {
+      ...block,
+      series: [
+        { label: "A", entity: "A", points: [{ x: "2022", y: 1 }, { x: "2024", y: 3 }] },
+        { label: "B", entity: "B", points: [{ x: "2023", y: 2 }] },
+      ],
+    };
+    const { container } = render(<ComparisonChart block={interleaved} />);
+    const labels = Array.from(container.querySelectorAll("svg > text")).map((el) => el.textContent);
+    expect(labels).toEqual(["2022", "2023", "2024"]);
+  });
 });

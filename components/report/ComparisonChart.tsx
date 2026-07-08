@@ -13,15 +13,31 @@ function fmt(n: number): string {
   return Math.abs(n) >= 1000 ? n.toLocaleString("en-US") : String(n);
 }
 
+// The union of x values is built in first-appearance order across series, which
+// zigzags when series are interleaved (A: 2022,2024; B: 2023). When every value
+// is orderable (all numeric, or all date-parseable) sort the domain so the axis
+// — and every line built from it — is monotonic; otherwise keep appearance order
+// (e.g. categorical labels like quarters/segments have no universal ordering here).
+export function sortedDomain(xs: string[]): string[] {
+  if (xs.every((x) => Number.isFinite(Number(x)))) {
+    return [...xs].sort((a, b) => Number(a) - Number(b));
+  }
+  if (xs.every((x) => !isNaN(Date.parse(x)))) {
+    return [...xs].sort((a, b) => Date.parse(a) - Date.parse(b));
+  }
+  return xs;
+}
+
 // Multi-entity overlay built from REAL card series: shared x domain (union, in
 // first-appearance order), shared y scale, one color per entity, legend chips
 // carrying the latest value, optional insight line beneath.
 export default function ComparisonChart({ block }: { block: ComparisonBlock }) {
-  const xs: string[] = [];
+  const rawXs: string[] = [];
   for (const s of block.series) for (const p of s.points) {
     const k = String(p.x);
-    if (!xs.includes(k)) xs.push(k);
+    if (!rawXs.includes(k)) rawXs.push(k);
   }
+  const xs = sortedDomain(rawXs);
   const ys = block.series.flatMap((s) => s.points.map((p) => p.y));
   if (!xs.length || !ys.length) return <div className="empty-note">no data</div>;
   const max = Math.max(...ys, 0), min = Math.min(...ys, 0);
