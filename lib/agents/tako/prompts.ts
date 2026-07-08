@@ -98,7 +98,18 @@ Return { atomic: boolean, rationale: string, entity: string, metric: string, sub
   Change (Year-over-Year)" via its "year-over-year" alias) instead of anything about stocks.
   Example: "How are gasoline prices contributing to inflation?" → entity "United States", metric
   "Gasoline Price" — do NOT put "inflation" or "gasoline prices" in \`entity\`. A query is later formed as
-  "\${entity} \${metric}", so a mis-placed target produces nonsense like "inflation contribution to inflation".`;
+  "\${entity} \${metric}", so a mis-placed target produces nonsense like "inflation contribution to inflation".
+- A sub-question's metric measures the sub-question's OWN subject — never the outcome/target variable the
+  parent question is explaining. In "what is driving X", X belongs to the PARENT's pair; each sub-question's
+  metric is ITS facet's series. This applies to EVERY driver sub-question, no exceptions:
+  energy → "Energy CPI"; gasoline → "Gasoline Price"; food → "Food CPI"; shelter → "Shelter CPI";
+  wages → "Wage Growth". "What is the impact of shelter costs on U.S. inflation?" → entity
+  "United States", metric "Shelter CPI" — NOT "Inflation Rate" (that is the parent's broad view). A facet
+  sub-question whose metric is the parent's outcome fetches the SAME general data as every sibling and is
+  worthless as research. Before returning, CHECK each sub: if its metric restates the parent's outcome
+  metric, replace it with the facet's own series.
+- Every sibling sub-question must carry a DIFFERENT pair. Two subs sharing the same entity+metric are the
+  same question — merge them or find the facet metric that separates them.`;
 
 // Turn a leaf/branch's evidence into a structured result the final layer reconciles.
 export const BRANCH_RESULT_SYSTEM = `You distill ONE research sub-question's evidence into a structured result.

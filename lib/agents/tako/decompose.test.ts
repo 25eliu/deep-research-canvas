@@ -47,4 +47,15 @@ describe("lookup-pair rules in prompts", () => {
     expect(DECOMPOSE_SYSTEM).toContain("ONLY in the graph's ENTITY namespace");
     expect(DECOMPOSE_SYSTEM).toContain("Apple Inc.");
   });
+
+  // Regression: facet sub-questions ("impact of shelter costs on inflation") were all assigned the
+  // PARENT's outcome metric ("Inflation Rate"), so every leaf resolved the same general graph menu and
+  // searched the overarching question instead of its own facet. The metric side must carry the same
+  // outcome-variable ban the entity side has, and siblings may never share a pair.
+  it("decompose bans the outcome variable as a sub-question's metric and forbids duplicate sibling pairs", () => {
+    expect(DECOMPOSE_SYSTEM).toContain("metric measures the sub-question's OWN subject");
+    expect(DECOMPOSE_SYSTEM).toContain("never the outcome/target variable");
+    expect(DECOMPOSE_SYSTEM).toContain("Shelter"); // the observed failure, taught as a concrete example
+    expect(DECOMPOSE_SYSTEM).toContain("DIFFERENT pair");
+  });
 });
