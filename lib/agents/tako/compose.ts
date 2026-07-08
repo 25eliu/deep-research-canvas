@@ -48,7 +48,7 @@ export function csvFigures(csv: string, label: string): GatheredFigure[] {
   return out;
 }
 
-function allowedSets(figures: GatheredFigure[]): { strings: Set<string>; mags: number[] } {
+export function allowedSets(figures: GatheredFigure[]): { strings: Set<string>; mags: number[] } {
   const strings = new Set<string>();
   const mags: number[] = [];
   for (const f of figures) {
@@ -154,8 +154,7 @@ export function validateBlock(block: AnswerBlock, allowed: { strings: Set<string
       return { ...block, events };
     }
     default:
-      // New block kinds (comparison/leaderboard/sections/timeline) get explicit
-      // validation in a later task; until then an unvalidated kind is dropped.
+      // Unknown/future block kind — fail closed.
       return null;
   }
 }

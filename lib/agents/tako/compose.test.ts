@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { numericMagnitude, csvFigures, validateBlock } from "./compose";
+import { numericMagnitude, csvFigures, validateBlock, allowedSets } from "./compose";
 
 describe("numericMagnitude", () => {
   it("parses plain numbers and thousands separators", () => {
@@ -21,14 +21,7 @@ describe("numericMagnitude", () => {
   });
 });
 
-const allow = (values: string[]) => {
-  // mirror allowedSets(): normalized strings + magnitudes
-  const figs = values.map((value) => ({ label: "f", value }));
-  return {
-    strings: new Set(figs.map((f) => f.value.replace(/\s+/g, "").toLowerCase())),
-    mags: figs.map((f) => Number(String(f.value).replace(/[^0-9.\-]/g, ""))).filter((n) => !Number.isNaN(n)),
-  };
-};
+const allow = (values: string[]) => allowedSets(values.map((value) => ({ label: "f", value })));
 
 describe("csvFigures", () => {
   it("turns every numeric cell (per column) into a gathered figure", () => {
@@ -76,5 +69,12 @@ describe("validateBlock — new kinds", () => {
     const out: any = validateBlock(block, allow(["$30B"]), () => {});
     expect(out.events[0].value).toBeUndefined();
     expect(out.events[0].title).toBe("Launch");
+  });
+  it("magnitude matching: a suffixed figure keeps an equivalent differently-formatted value", () => {
+    const block: any = { kind: "leaderboard", metricLabel: "Rev", rows: [
+      { rank: 1, entity: "Nvidia", value: "$75.2B" },
+    ] };
+    const out: any = validateBlock(block, allow(["$75.2 billion"]), () => {});
+    expect(out.rows).toHaveLength(1);
   });
 });
