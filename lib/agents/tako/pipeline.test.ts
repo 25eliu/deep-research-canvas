@@ -33,6 +33,7 @@ vi.mock("../../llm", () => ({
     for (const c of chunks) opts.onToken(c);
     return chunks.join("");
   }),
+  generateWithTools: vi.fn(async () => ({ text: "", steps: 0 })),
 }));
 
 vi.mock("./graph", () => ({

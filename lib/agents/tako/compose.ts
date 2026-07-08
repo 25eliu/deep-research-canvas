@@ -1,17 +1,30 @@
-// Final answer layer: Claude composes a multi-block "answer report" (verdict +
-// table/chart/tiles/prose) by reconciling the structured branch results and the
-// gathered figures. Every number is validated against real gathered figures —
-// anything untraceable is dropped and logged, so the report never shows a
+// Final answer layer: the deep GPT model first runs a tool loop to gather the real
+// card CSV series it needs (get_card_contents), then composes a multi-block "answer
+// report" (verdict + comparison/leaderboard/sections/timeline/tiles/table/chart/prose)
+// by reconciling the structured branch results, gathered figures, and fetched card
+// contents. Every number is validated against real gathered figures + fetched CSV
+// values — anything untraceable is dropped and logged, so the report never shows a
 // hallucinated value.
 import type { AnswerReport, AnswerBlock } from "../../schema";
-import { generateStructured } from "../../llm";
+import type { TakoCallRecord } from "../shared/types";
+import { generateStructured, generateWithTools } from "../../llm";
+import { tool } from "ai";
+import { z } from "zod";
 import { zAnswerReport } from "../shared/schemas";
 import { ctxBlock } from "../shared/ctx";
-import { REPORT_SYSTEM } from "./prompts";
+import { REPORT_SYSTEM, REPORT_GATHER_SYSTEM } from "./prompts";
 import { log } from "../../log";
-import type { ResearchCtx, GatheredFigure } from "./research";
+import { fetchContents, excerptCsv, SYNTH_ID, type ResearchCtx, type GatheredFigure } from "./flow";
 
-const ANTHROPIC = "anthropic" as const;
+const deepModel = () => process.env.SYNTH_MODEL || "gpt-5.4";
+const COMPOSER_CONTENTS_BUDGET = 8; // extra fetch headroom for the gather phase (cache hits are free)
+const COMPOSER_MAX_STEPS = 10;
+const COMPOSER_CSV_EXCERPT = 2400; // larger than leaf excerpts — the composer charts real series
+const COMPOSER_CSV_ROWS = 60;
+
+function errorMessage(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
 
 // Parse a numeric magnitude from a value string ("$75.2B" → 75.2e9, "71%" → 71,
 // "5,780" → 5780). Returns null when there's no number.
@@ -159,10 +172,68 @@ export function validateBlock(block: AnswerBlock, allowed: { strings: Set<string
   }
 }
 
-// Compose the final report from the tree's gathered evidence. Returns null when
-// there's nothing to report (caller falls back to a plain chat answer).
+// Phase A: the gather tool loop. The deep model reads the card catalog and pulls
+// the REAL series it needs (both sides of a comparison, ranking members, …).
+// Returns the analyst note + everything fetched; failure returns empty (compose
+// proceeds without card contents — never throws).
+async function gatherCardContents(
+  ctx: ResearchCtx, question: string,
+  catalog: { id: string; title: string; entity?: string; source?: string; description?: string }[],
+): Promise<{ notes: string; fetched: Map<string, string> }> {
+  const fetched = new Map<string, string>();
+  if (catalog.length === 0) return { notes: "", fetched };
+  ctx.contents.cap = ctx.contents.fetched + COMPOSER_CONTENTS_BUDGET;
+  try {
+    const res = await generateWithTools({
+      provider: "openai", model: deepModel(), reasoningEffort: "high",
+      system: REPORT_GATHER_SYSTEM,
+      prompt: `${ctxBlock(ctx.req)}\n\nQUESTION: ${question}\n\nCARD_CATALOG: ${JSON.stringify(catalog)}\n\nSUB_ANSWERS: ${JSON.stringify(ctx.branchResults.map((b) => ({ question: b.question, claim: b.claim })))}`,
+      maxSteps: COMPOSER_MAX_STEPS, label: "report-gather",
+      tools: {
+        get_card_contents: tool({
+          description: "Fetch the real underlying data series (CSV) behind a Tako card from CARD_CATALOG.",
+          parameters: z.object({ cardId: z.string() }),
+          execute: async ({ cardId }) => {
+            const f = ctx.ledger.list().find((x) => x.card.cardId === cardId);
+            if (!f) return "unknown cardId";
+            const t0 = Date.now();
+            const csv = await fetchContents(ctx, f.card.webpageUrl);
+            const call: TakoCallRecord = {
+              callId: `${SYNTH_ID}:contents:${ctx.calls.length}`, nodeId: SYNTH_ID,
+              query: f.title, endpoint: "/v1/contents", effort: "fast", ms: Date.now() - t0,
+              cards: [{ id: cardId, title: f.title, source: f.source, url: f.url }],
+              ...(csv ? {} : { error: "no data available" }),
+            };
+            ctx.calls.push(call);
+            ctx.emit?.({ type: "tako_call", call });
+            if (!csv) return "no data available";
+            fetched.set(cardId, csv);
+            return excerptCsv(csv, COMPOSER_CSV_EXCERPT, COMPOSER_CSV_ROWS);
+          },
+        }),
+      },
+    });
+    return { notes: res.text, fetched };
+  } catch (e: unknown) {
+    ctx.notes.push(`report gather failed — ${errorMessage(e)}`);
+    return { notes: "", fetched };
+  }
+}
+
+// Compose the final report from the tree's gathered evidence + on-demand card
+// contents. Returns null when there's nothing to report (caller falls back).
 export async function composeReport(ctx: ResearchCtx, question: string): Promise<AnswerReport | null> {
   if (ctx.figures.length === 0 && ctx.branchResults.length === 0) return null;
+
+  const catalog = ctx.ledger.list()
+    .filter((f) => f.kind === "data_card")
+    .map((f) => ({
+      id: f.card.cardId, title: f.title, entity: f.section, source: f.source,
+      description: f.card.description?.slice(0, 200),
+    }));
+
+  const { notes: analystNotes, fetched } = await gatherCardContents(ctx, question, catalog);
+
   const subAnswers = ctx.branchResults.map((b) => ({
     question: b.question, claim: b.claim, confidence: b.confidence,
     keyFigures: b.figures.map((f) => ({ label: f.label, value: f.value, entity: f.entity })),
@@ -172,28 +243,31 @@ export async function composeReport(ctx: ResearchCtx, question: string): Promise
     title: w.title, publisher: w.source, snippet: w.summary,
     content: (w.content || w.summary || "").slice(0, 1500),
   }));
+  const cardContents = Array.from(fetched.entries()).map(([id, csv]) => ({
+    cardId: id,
+    title: catalog.find((c) => c.id === id)?.title,
+    data: excerptCsv(csv, COMPOSER_CSV_EXCERPT, COMPOSER_CSV_ROWS),
+  }));
 
-  const prompt = `${ctxBlock(ctx.req)}\n\nQUESTION: ${question}\n\nSUB_ANSWERS: ${JSON.stringify(subAnswers)}\n\nFIGURES: ${JSON.stringify(figures)}\n\nWEB_SOURCES: ${JSON.stringify(webSources)}`;
+  const prompt = `${ctxBlock(ctx.req)}\n\nQUESTION: ${question}\n\nSUB_ANSWERS: ${JSON.stringify(subAnswers)}\n\nFIGURES: ${JSON.stringify(figures)}\n\nWEB_SOURCES: ${JSON.stringify(webSources)}\n\nCARD_CONTENTS: ${JSON.stringify(cardContents)}\n\nANALYST_NOTES: ${analystNotes || "(none)"}`;
+
   let report: AnswerReport;
   try {
-    report = await generateStructured({ provider: ANTHROPIC, system: REPORT_SYSTEM, prompt, schema: zAnswerReport, label: "answer-report" });
+    report = await generateStructured({
+      provider: "openai", model: deepModel(), reasoningEffort: "high",
+      system: REPORT_SYSTEM, prompt, schema: zAnswerReport, label: "answer-report",
+    });
   } catch (e: unknown) {
-    // Claude is the preferred final layer; if it's unavailable (no key / error),
-    // fall back to the deep GPT model so the composed report still works.
-    ctx.notes.push(`answer-report via Claude failed, falling back to GPT — ${e instanceof Error ? e.message : String(e)}`);
-    try {
-      report = await generateStructured({
-        provider: "openai", model: process.env.SYNTH_MODEL || "gpt-5.4",
-        system: REPORT_SYSTEM, prompt, schema: zAnswerReport, label: "answer-report-fallback",
-      });
-    } catch (e2: unknown) {
-      ctx.notes.push(`answer-report fallback failed — ${e2 instanceof Error ? e2.message : String(e2)}`);
-      return null;
-    }
+    ctx.notes.push(`answer-report failed — ${errorMessage(e)}`);
+    return null;
   }
 
-  // Validate every number against the gathered figures; drop the untraceable.
-  const allowed = allowedSets(ctx.figures);
+  // Validate every number against gathered figures PLUS the fetched CSV values.
+  const csvDerived: GatheredFigure[] = [];
+  for (const [id, csv] of fetched) {
+    csvDerived.push(...csvFigures(csv, catalog.find((c) => c.id === id)?.title || id));
+  }
+  const allowed = allowedSets([...ctx.figures, ...csvDerived]);
   let dropped = 0;
   const blocks = report.blocks
     .map((b) => validateBlock(b, allowed, () => { dropped++; }))

@@ -161,24 +161,36 @@ Rules: no [n] citation markers, no sources/links list (the cards carry their own
 traceable to the sub-answers / broad findings — never invent a number or source. Never comment on missing or
 absent data; omit unavailable figures silently.`;
 
-// The final layer (Claude): reconcile the evidence and compose a multi-block answer report.
+// Phase A of the final layer: the deep GPT model reads the card catalog and pulls
+// the REAL underlying series it needs via a tool loop before the report is written.
+export const REPORT_GATHER_SYSTEM = `You prepare the FINAL ANSWER for a research question. You are given SUB_ANSWERS,
+FIGURES, WEB_SOURCES, and CARD_CATALOG — every real Tako data card found this turn ({id, title, entity, source, description}).
+You have ONE tool: get_card_contents(cardId) → the card's REAL underlying data series as CSV.
+Fetch the series you need to answer precisely — ALWAYS fetch both/all sides of a comparison, the members of a
+ranking, and any series you intend to chart. Do NOT fetch cards irrelevant to the question. Then reply with a
+SHORT analyst note (<=150 words): what the fetched data shows, which cards matter most, and any conflict between
+sources. Plain text only.`;
+
+// Phase B of the final layer (GPT): reconcile the evidence and compose a multi-block answer report.
 export const REPORT_SYSTEM = `You are the lead analyst composing the FINAL ANSWER as a clear, well-made report for the top of a research canvas.
 You are given the QUESTION, SUB_ANSWERS (each {question, claim, keyFigures, confidence}), the full gathered FIGURES
-(every real number available this turn, each {label, value, entity, source}), and WEB_SOURCES (title, publisher,
-snippet, and a fuller \`content\` excerpt of the page).
-GROUND THE ANSWER IN THE TAKO DATA FIRST — the FIGURES and SUB_ANSWERS are the backbone; then use WEB_SOURCES to add
-context, recency, and drivers the structured data doesn't capture (read their \`content\`, not just the snippet).
-RECONCILE the evidence — where it agrees, where it conflicts, what outweighs what — into a decisive verdict.
-Return { verdict, blocks } where blocks is an ORDERED list chosen to make the answer maximally clear:
-- { kind:"prose", md } — the reasoning: agreements, tensions, and why the verdict holds. Markdown: **bold**, "## " headings, "- " bullets only.
-- { kind:"table", columns, rows } — a comparison/leaderboard when the question compares/ranks entities (entities as rows, metrics as columns).
-- { kind:"chart", title?, chartSpec:{kind:"bar"|"line", unit?, series:[{label, points:[{x,y}]}]} } — when comparable numbers are clearer as a chart.
-- { kind:"tiles", tiles:[{label, value, delta?}] } — headline stat callouts.
-Rules: put the verdict first; include only the blocks that genuinely add clarity (not every kind). Use ONLY numbers
-present in FIGURES/SUB_ANSWERS — copy values verbatim; NEVER invent, extrapolate, or round beyond what's given.
-Actively DRAW ON WEB_SOURCES for qualitative context, recent developments, and drivers the structured figures don't
-capture — weave their facts into the prose and verdict. When a claim leans on a web source, name the publisher
-inline (e.g. "per Reuters"). No citation markers.`;
+(every real number available this turn, each {label, value, entity, source}), WEB_SOURCES (title, publisher, snippet,
+content excerpt), CARD_CONTENTS (real CSV series fetched from Tako cards this turn), and ANALYST_NOTES.
+GROUND THE ANSWER IN THE TAKO DATA FIRST — FIGURES, CARD_CONTENTS and SUB_ANSWERS are the backbone; use WEB_SOURCES
+for context, recency, and drivers. RECONCILE the evidence into a decisive verdict.
+Return { verdict, blocks } — an ORDERED list of representation blocks. CHOOSE THE SHAPE THAT FITS THE QUESTION:
+- comparison question ("X vs Y", "which is better") → { kind:"comparison", title?, unit?, series:[{label, entity, points:[{x,y}]}], insight? }
+  built ONLY from CARD_CONTENTS series (copy real values; align the x axes), plus a prose block reconciling them.
+- "top N / best / largest" → { kind:"leaderboard", title?, metricLabel, rows:[{rank, entity, value, delta?, detail?:{md, stats?}}] }
+  — fill detail ONLY where SUB_ANSWERS/FIGURES give real material for that entity.
+- "what factors/drivers affect X" → { kind:"sections", sections:[{title, md, figure?, chartSpec?}] } — one section per factor.
+- "how did X change/evolve/what happened" → { kind:"timeline", events:[{date, title, md?, value?}] }.
+- simple lookup → { kind:"tiles", tiles:[{label, value, delta?}] } + short prose.
+Also available: { kind:"prose", md } (reasoning; markdown: **bold**, "## ", "- " only), { kind:"table", columns, rows },
+{ kind:"chart", title?, chartSpec:{kind:"bar"|"line", unit?, series:[{label, points}]} }.
+Rules: verdict first; include ONLY blocks that genuinely add clarity (usually 2-3). Use ONLY numbers present in
+FIGURES / SUB_ANSWERS / CARD_CONTENTS — copy values verbatim; NEVER invent, extrapolate, or round beyond what's given.
+Draw on WEB_SOURCES for qualitative context; name the publisher inline (e.g. "per Reuters"). No citation markers.`;
 
 export const SEARCH_LEAF_COMPOSE_SYSTEM = `You write Tako /v3/search queries that answer ONE specific sub-question, working from the question text ALONE (no knowledge graph).
 - Output 1-3 queries. Each must be a DISTINCT angle on the sub-question (a different metric, facet, or entity) — never near-duplicates.
