@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { zResearchPlan, zAnswerBlock } from "./schemas";
+import { zResearchPlan, zAnswerBlock, zGapPlan } from "./schemas";
 
 // Every research question is a LOOKUP PAIR: exactly one entity term (entity-namespace
 // graph search) + one metric term (metric-namespace graph search). The schema is the
@@ -77,5 +77,18 @@ describe("zAnswerBlock — new question-shaped kinds", () => {
     expect(zAnswerBlock.safeParse({ kind: "leaderboard", metricLabel: "x", rows: [] }).success).toBe(false);
     expect(zAnswerBlock.safeParse({ kind: "sections", sections: [] }).success).toBe(false);
     expect(zAnswerBlock.safeParse({ kind: "timeline", events: [] }).success).toBe(false);
+  });
+});
+
+describe("zGapPlan — gap-analysis output", () => {
+  const gap = { question: "amd revenue", entity: "AMD", metric: "Revenue", why: "missing comparison half" };
+  it("accepts sufficient with empty gaps, and a gap list", () => {
+    expect(zGapPlan.safeParse({ sufficient: true, rationale: "covered", gaps: [] }).success).toBe(true);
+    expect(zGapPlan.safeParse({ sufficient: false, rationale: "one side missing", gaps: [gap] }).success).toBe(true);
+  });
+  it("rejects a gap missing its entity/metric pair or with empty strings", () => {
+    const { metric: _m, ...noMetric } = gap;
+    expect(zGapPlan.safeParse({ sufficient: false, rationale: "r", gaps: [noMetric] }).success).toBe(false);
+    expect(zGapPlan.safeParse({ sufficient: false, rationale: "r", gaps: [{ ...gap, entity: "" }] }).success).toBe(false);
   });
 });

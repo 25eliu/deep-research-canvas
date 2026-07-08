@@ -74,3 +74,17 @@ export const zStructure = z.object({
   headline: z.string(),
   sections: z.array(z.object({ entity: z.string(), summary: z.string() })).optional(),
 });
+
+// Gap-analysis output: what the evidence review says is still missing before the
+// final report can answer decisively. Each gap is a ready-to-run lookup PAIR.
+export const zGapPlan = z.object({
+  sufficient: z.boolean(),
+  rationale: z.string(),
+  gaps: z.array(z.object({
+    question: z.string().min(1),
+    entity: z.string().min(1),
+    metric: z.string().min(1),
+    why: z.string(),
+  })),
+});
+export type GapPlan = z.infer<typeof zGapPlan>;
