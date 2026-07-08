@@ -13,6 +13,7 @@ vi.mock("../../llm", () => ({
     if (opts.label === "search-leaf-compose") return { queries: h.leaf };
     if (opts.label === "search-broad-compose") return { queries: h.broad };
     if (opts.label === "answer-report") return h.report;
+    if (opts.label === "gap-analysis") return { sufficient: true, rationale: "covered", gaps: [] };
     return {};
   }),
   streamAnswer: vi.fn(async (opts: any) => { opts.onToken("ok"); return "ok"; }),

@@ -6,6 +6,7 @@ const h = vi.hoisted(() => ({
   related: ["Revenue"] as string[], // metrics graphRelated returns for every entity
   composeFallback: ["fallback q"] as string[], // free-form compose fallback (only when nothing grounded)
   report: { verdict: "**Nvidia leads.**", blocks: [{ kind: "prose", md: "Because revenue." }] } as any,
+  gapPlan: { sufficient: true, rationale: "covered", gaps: [] } as any,
 }));
 
 vi.mock("../../llm", () => ({
@@ -19,13 +20,18 @@ vi.mock("../../llm", () => ({
     if (opts.label === "grounded-compose") {
       // Echo the resolved entity paired with every available metric (worst case: the
       // LLM keeps them all) — each cites a listed metric so the guard keeps them.
-      const p = String(opts.prompt);
-      const ent = p.includes("Nvidia") ? "Nvidia" : p.includes("AMD") ? "AMD" : null;
+      // Read the entity off the RESOLVED: block (this leaf's actual resolved entity),
+      // NOT the whole prompt — ctxBlock always echoes the top-level user message
+      // ("compare Nvidia and AMD" mentions BOTH names), so scanning the full prompt
+      // would misidentify every leaf as Nvidia.
+      const resolvedBlock = String(opts.prompt).split("RESOLVED:\n")[1] || "";
+      const ent = resolvedBlock.includes("AMD") ? "AMD" : resolvedBlock.includes("Nvidia") ? "Nvidia" : null;
       return { queries: ent ? h.related.map((m: string) => `${ent} ${m}`) : [] };
     }
     if (opts.label === "compose") return { queries: h.composeFallback };
     if (opts.label === "broad-compose") return { queries: ["macro overview"] };
     if (opts.label === "answer-report") return h.report;
+    if (opts.label === "gap-analysis") return h.gapPlan;
     return {};
   }),
   streamAnswer: vi.fn(async (opts: any) => {
@@ -55,6 +61,7 @@ vi.mock("../../tako", () => ({
     opts.onCall?.({ query: q, endpoint: "/v3/search", effort: opts.effort ?? "fast", web: !!opts.web, ms: 1, cards });
     return cards;
   }),
+  takoContents: vi.fn(async () => ({ csv: "Timestamp,V\n2024,1" })),
 }));
 
 import { runTakoInitial } from "./pipeline";
@@ -80,6 +87,7 @@ beforeEach(() => {
   h.related = ["Revenue"];
   h.composeFallback = ["fallback q"];
   h.report = { verdict: "**Nvidia leads.**", blocks: [{ kind: "prose", md: "Because revenue." }] };
+  h.gapPlan = { sufficient: true, rationale: "covered", gaps: [] };
 });
 
 describe("runTakoInitial — recursive research tree", () => {
@@ -227,5 +235,43 @@ describe("runTakoInitial — recursive research tree", () => {
     const result = await runTakoInitial(req, () => {});
     expect(result.nodeOps.filter((o: any) => o.op === "add_node").length).toBe(0);
     expect(result.narration).toContain("couldn't find");
+  });
+
+  it("runs ONE gap-fill round: gap leaf renders with gapFill, wires derived_from to synth", async () => {
+    h.plans["compare Nvidia and AMD"] = {
+      atomic: false, rationale: "split", entity: "Nvidia", metric: "Revenue",
+      subQuestions: [
+        { question: "nvidia revenue", entity: "Nvidia", metric: "Revenue" },
+        { question: "nvidia margin", entity: "Nvidia", metric: "Revenue" },
+      ],
+    };
+    h.gapPlan = { sufficient: false, rationale: "AMD side missing", gaps: [
+      { question: "amd revenue", entity: "AMD", metric: "Revenue", why: "comparison half missing" },
+    ] };
+    const events: any[] = [];
+    const result = await runTakoInitial(req, (e) => events.push(e));
+
+    const gapNode = result.nodeOps.find((o: any) => o.op === "add_node" && o.node.gapFill) as any;
+    expect(gapNode).toBeTruthy();
+    expect(gapNode.node.role).toBe("research");
+
+    const edges = result.nodeOps.filter((o: any) => o.op === "add_edge").map((o: any) => o.edge);
+    expect(edges.some((e: any) => e.kind === "derived_from" && e.from === gapNode.node.id && e.to === "synth")).toBe(true);
+
+    // gap reasoning event streamed with kind "gap"; trace tree records the gap leaf
+    expect(events.some((e) => e.type === "reasoning" && e.kind === "gap")).toBe(true);
+    const treeGap = result.trace.tree?.find((n) => n.gapFill);
+    expect(treeGap?.question).toBe("amd revenue");
+
+    // gap findings reached the composer's figure pool → its card exists on the canvas
+    expect(result.nodeOps.some((o: any) => o.op === "add_node" && o.node.tako?.cardId === "amd")).toBe(true);
+  });
+
+  it("sufficient gap analysis adds no research nodes beyond the tree", async () => {
+    h.plans["compare Nvidia and AMD"] = twoBranchPlan;
+    const result = await runTakoInitial(req, () => {});
+    const research = result.nodeOps.filter((o: any) => o.op === "add_node" && o.node.role === "research") as any[];
+    expect(research).toHaveLength(2);
+    expect(research.every((o) => !o.node.gapFill)).toBe(true);
   });
 });

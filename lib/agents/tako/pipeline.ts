@@ -3,6 +3,7 @@ import type { EmitFn, PipelineResult, Timings } from "../shared/types";
 import { FindingLedger } from "./findings";
 import { research, newResearchCtx, toNodeSources, SYNTH_ID } from "./research";
 import { composeReport } from "./compose";
+import { runGapRound } from "./gaps";
 import { log } from "../../log";
 import { graphStrategy, type QueryStrategy } from "./strategy";
 
@@ -35,6 +36,9 @@ export async function runTakoInitial(
     narration = "I couldn't find structured data for this question in Tako.";
     emit?.({ type: "token", text: narration });
   } else {
+    // One gap-fill round: review the gathered evidence, fetch what's missing.
+    await runGapRound(ctx, req.message);
+    emit?.({ type: "trace", stage: "composing report" });
     // Final layer: Claude reconciles the evidence into a composed answer report
     // (verdict + validated table/chart/tiles/prose), stored on the synth block.
     emit?.({ type: "synthesis", phase: "start", nodeId: SYNTH_ID, kind: "root" });
