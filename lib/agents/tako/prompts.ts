@@ -17,8 +17,15 @@ Prefer a handful, not an exhaustive list.`;
 export const COMPOSE_SYSTEM = `You write Tako /v3/search queries for ONE SPECIFIC sub-question, grounded in resolved graph data.
 You are given the SUB_QUESTION and RESOLVED — what the Tako graph actually has: each resolved entity with its
 available metrics (name [aliases] — description), and possibly a "Standalone series" list (country-level series).
-Return { queries: string[] } — 1 to 3.
+Return { queries: string[] } — 0 to 3.
 Rules:
+- FIRST check relevance: RESOLVED comes from KEYWORD lookup, so it may contain only keyword near-misses about
+  entirely different subjects (e.g. sub-question about "the AI inference market" → resolved entity "Infer, Inc.", a
+  company that merely shares a keyword). If NOTHING in RESOLVED genuinely answers the SUB_QUESTION, return an
+  EMPTY list — { queries: [] } is the CORRECT answer there. NEVER compose queries from an irrelevant menu just
+  because the data exists ("Infer, Inc.'s Aggregate Value Raised" answers nothing about the AI inference
+  market). The caller has a fallback that searches the sub-question's own terms directly — an empty list
+  hands over to it; junk queries block it.
 - Phrase each query as a concise natural-language data question or ask (e.g. "How has US shelter CPI changed
   in 2025?", "How much revenue did Nvidia make last quarter?") — not a bare keyword string.
 - Each query names exactly ONE entity/subject. Tako search resolves single-entity questions far better than

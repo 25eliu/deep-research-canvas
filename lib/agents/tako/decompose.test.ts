@@ -35,6 +35,15 @@ describe("lookup-pair rules in prompts", () => {
     }
   });
 
+  // Regression: when the graph resolves only keyword near-misses ("AI inference market" →
+  // "Infer, Inc."), the composer was forced into 1-3 queries and cited the junk menu
+  // ("Infer, Inc.'s Aggregate Value Raised"). An empty list must be a legal, correct answer.
+  it("compose may return ZERO queries when RESOLVED is irrelevant, instead of forcing junk", () => {
+    expect(COMPOSE_SYSTEM).toContain("0 to 3");
+    expect(COMPOSE_SYSTEM).toContain("EMPTY list");
+    expect(COMPOSE_SYSTEM).toContain("keyword near-miss");
+  });
+
   it("decompose targets one pair per question and splits any versus/and", () => {
     expect(DECOMPOSE_SYSTEM).toContain("ONE entity + ONE metric");
     expect(DECOMPOSE_SYSTEM).toContain(`every "and"`);
