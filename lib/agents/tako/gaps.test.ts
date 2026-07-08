@@ -5,6 +5,9 @@ const h = vi.hoisted(() => ({
   plan: { sufficient: true, rationale: "covered", gaps: [] } as any,
   leafResult: { nodeId: "rq_gap", title: "g", synthesis: "s", findingCount: 1, children: [], depth: 1, kind: "leaf" } as any,
   leafCalls: [] as any[],
+  // Per-question override: when set for a question, researchLeaf rejects instead
+  // of resolving (simulates a leaf-synth streamAnswer throw for just that gap).
+  leafRejections: {} as Record<string, string>,
 }));
 
 vi.mock("../../llm", () => ({
@@ -21,7 +24,12 @@ vi.mock("./flow", () => ({
   SYNTH_ID: "synth",
   uniqueResearchId: vi.fn((_ctx: any, q: string) => `rq_${q.replace(/\W+/g, "_")}`),
   derivedEdge: vi.fn((from: string, to: string) => ({ op: "add_edge", edge: { id: `derives:${from}->${to}`, from, to, kind: "derived_from" } })),
-  researchLeaf: vi.fn(async (...args: any[]) => { h.leafCalls.push(args); return { ...h.leafResult, nodeId: args[2] }; }),
+  researchLeaf: vi.fn(async (...args: any[]) => {
+    h.leafCalls.push(args);
+    const question = args[0];
+    if (h.leafRejections[question]) throw new Error(h.leafRejections[question]);
+    return { ...h.leafResult, nodeId: args[2] };
+  }),
 }));
 
 import { runGapRound } from "./gaps";
@@ -48,7 +56,9 @@ const gap = (n: number) => ({ question: `gap ${n}`, entity: `E${n}`, metric: "Re
 beforeEach(() => {
   vi.clearAllMocks();
   h.plan = { sufficient: true, rationale: "covered", gaps: [] };
+  h.leafResult = { nodeId: "rq_gap", title: "g", synthesis: "s", findingCount: 1, children: [], depth: 1, kind: "leaf" };
   h.leafCalls = [];
+  h.leafRejections = {};
 });
 
 describe("runGapRound", () => {
@@ -104,5 +114,17 @@ describe("runGapRound", () => {
     const res = await runGapRound(ctx, "q");
     expect(res.filled).toBe(0);
     expect(ctx._ops.filter((o: any) => o.op === "add_edge")).toHaveLength(0);
+  });
+
+  it("one gap leaf throwing does not kill the round — the other still fills, and a note is pushed", async () => {
+    h.plan = { sufficient: false, rationale: "r", gaps: [gap(1), gap(2)] };
+    h.leafRejections["gap 1"] = "leaf-synth stream failed";
+    const ctx = fakeCtx();
+    const res = await runGapRound(ctx, "q");
+    expect(res.ran).toBe(true);
+    expect(res.filled).toBe(1); // only gap 2 succeeded
+    expect(ctx.notes.some((n: string) => n.includes('gap fill failed for "gap 1"') && n.includes("leaf-synth stream failed"))).toBe(true);
+    const edges = ctx._ops.filter((o: any) => o.op === "add_edge").map((o: any) => o.edge);
+    expect(edges.filter((e: any) => e.kind === "derived_from" && e.to === "synth")).toHaveLength(1);
   });
 });

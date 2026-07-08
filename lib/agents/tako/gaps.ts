@@ -61,7 +61,15 @@ export async function runGapRound(ctx: ResearchCtx, question: string): Promise<G
       rationale: g.why, entities: [g.entity], metrics: [g.metric],
     });
     ctx.reasoning.push({ nodeId, question: g.question, rationale: g.why });
-    return researchLeaf(g.question, 1, nodeId, false, ctx, [g.entity], [g.metric], g.why, { gapFill: true });
+    try {
+      return await researchLeaf(g.question, 1, nodeId, false, ctx, [g.entity], [g.metric], g.why, { gapFill: true });
+    } catch (e: unknown) {
+      // A single gap-fill leaf failing (e.g. leaf-synth's streamAnswer rethrowing)
+      // must not take down an otherwise-complete turn — note it and drop it, same
+      // as the "found nothing" exclusion below.
+      ctx.notes.push(`gap fill failed for "${g.question}" — ${errorMessage(e)}`);
+      return { nodeId: null, findingCount: 0 };
+    }
   }));
 
   let filled = 0;
