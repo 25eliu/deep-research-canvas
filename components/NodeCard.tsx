@@ -141,7 +141,10 @@ export default function NodeCard({
 
           {isResearch && (
             <div className="synth research-synth">
-              <div className="synth-kicker">Sub-answer</div>
+              <div className="synth-kicker">
+                Sub-answer
+                {node.gapFill ? <span className="gap-badge" title="Fetched by the gap-fill round after the first research pass">gap fill</span> : null}
+              </div>
               {node.summary
                 ? <div className="synth-body"><Markdown text={node.summary} compact /></div>
                 : <div className="synth-body synth-pending">Researching…</div>}

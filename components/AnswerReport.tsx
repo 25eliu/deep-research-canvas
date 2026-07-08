@@ -2,6 +2,10 @@
 import type { AnswerReport as Report } from "@/lib/schema";
 import Markdown from "./Markdown";
 import MiniChart from "./MiniChart";
+import ComparisonChart from "./report/ComparisonChart";
+import Leaderboard from "./report/Leaderboard";
+import FactorSections from "./report/FactorSections";
+import Timeline from "./report/Timeline";
 
 // Renders the composed final-answer "report": a bold verdict followed by an
 // ordered list of representation blocks (prose / comparison table / chart /
@@ -46,6 +50,14 @@ export default function AnswerReport({ report }: { report: Report }) {
                 <MiniChart spec={b.chartSpec} />
               </div>
             );
+          case "comparison":
+            return <ComparisonChart key={i} block={b} />;
+          case "leaderboard":
+            return <Leaderboard key={i} block={b} />;
+          case "sections":
+            return <FactorSections key={i} block={b} />;
+          case "timeline":
+            return <Timeline key={i} block={b} />;
           default:
             return null;
         }

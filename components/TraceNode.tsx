@@ -59,6 +59,7 @@ export default function TraceNode({ node, defaultOpen }: { node: TraceNodeView; 
       >
         <IconChevronRight className={`disclosure-chev${open ? " open" : ""}`} />
         <span className="q">{node.question || "(unnamed step)"}</span>
+        {(node.kind === "gap" || node.gapFill) && <span className="trace-gap-chip">gap fill</span>}
         {node.findingCount > 0 && <span className="trace-node-count">{node.findingCount}</span>}
       </button>
 
