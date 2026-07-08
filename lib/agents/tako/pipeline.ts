@@ -46,11 +46,25 @@ export async function runTakoInitial(
     const report = await composeReport(ctx, req.message);
     ctx.timings.stream = Math.max(ctx.timings.stream, Date.now() - t);
     emit?.({ type: "synthesis", phase: "end", nodeId: SYNTH_ID, kind: "root" });
+    // The root answer's "see sources" = every website used across the whole tree.
+    const rootSources = toNodeSources(ctx.webSources);
     if (report) {
-      // The root answer's "see sources" = every website used across the whole tree.
-      const rootSources = toNodeSources(ctx.webSources);
       push([{ op: "update_node", id: SYNTH_ID, patch: {
         title: report.verdict.slice(0, 90), summary: report.verdict, report,
+        ...(rootSources.length ? { sources: rootSources } : {}),
+      } }]);
+    } else {
+      // The composer failed (or found nothing to reconcile), but evidence was
+      // gathered — never leave the synth node stuck on "Synthesizing…"; patch it
+      // with a degraded summary built straight from the branch claims so the user
+      // still gets an answer.
+      const claims = ctx.branchResults.map((b) => b.claim).filter((c) => c.length > 0);
+      const title = (claims[0] || req.message).slice(0, 90);
+      const summary = claims.length
+        ? `The final report could not be composed — here is what the research found:\n${claims.map((c) => `- ${c}`).join("\n")}`
+        : "The final report could not be composed.";
+      push([{ op: "update_node", id: SYNTH_ID, patch: {
+        title, summary,
         ...(rootSources.length ? { sources: rootSources } : {}),
       } }]);
     }

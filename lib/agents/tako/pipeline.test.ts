@@ -7,6 +7,7 @@ const h = vi.hoisted(() => ({
   composeFallback: ["fallback q"] as string[], // free-form compose fallback (only when nothing grounded)
   report: { verdict: "**Nvidia leads.**", blocks: [{ kind: "prose", md: "Because revenue." }] } as any,
   gapPlan: { sufficient: true, rationale: "covered", gaps: [] } as any,
+  reportShouldFail: false, // when true, the "answer-report" call throws (composeReport → null)
 }));
 
 vi.mock("../../llm", () => ({
@@ -30,7 +31,10 @@ vi.mock("../../llm", () => ({
     }
     if (opts.label === "compose") return { queries: h.composeFallback };
     if (opts.label === "broad-compose") return { queries: ["macro overview"] };
-    if (opts.label === "answer-report") return h.report;
+    if (opts.label === "answer-report") {
+      if (h.reportShouldFail) throw new Error("answer-report boom");
+      return h.report;
+    }
     if (opts.label === "gap-analysis") return h.gapPlan;
     return {};
   }),
@@ -88,6 +92,7 @@ beforeEach(() => {
   h.composeFallback = ["fallback q"];
   h.report = { verdict: "**Nvidia leads.**", blocks: [{ kind: "prose", md: "Because revenue." }] };
   h.gapPlan = { sufficient: true, rationale: "covered", gaps: [] };
+  h.reportShouldFail = false;
 });
 
 describe("runTakoInitial — recursive research tree", () => {
@@ -265,6 +270,18 @@ describe("runTakoInitial — recursive research tree", () => {
 
     // gap findings reached the composer's figure pool → its card exists on the canvas
     expect(result.nodeOps.some((o: any) => o.op === "add_node" && o.node.tako?.cardId === "amd")).toBe(true);
+  });
+
+  it("composeReport failure degrades gracefully: synth gets a summary, no report, not stuck pending", async () => {
+    h.plans["compare Nvidia and AMD"] = twoBranchPlan;
+    h.reportShouldFail = true;
+    const result = await runTakoInitial(req, () => {});
+    const synthUpdate = result.nodeOps.filter((o: any) => o.op === "update_node" && o.id === "synth").pop() as any;
+    expect(synthUpdate).toBeTruthy();
+    expect(synthUpdate.patch.summary).toBeTruthy();
+    expect(typeof synthUpdate.patch.summary).toBe("string");
+    expect(synthUpdate.patch.summary.length).toBeGreaterThan(0);
+    expect(synthUpdate.patch.report).toBeUndefined();
   });
 
   it("sufficient gap analysis adds no research nodes beyond the tree", async () => {
