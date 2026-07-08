@@ -181,7 +181,7 @@ export async function research(question: string, depth: number, ctx: ResearchCtx
 async function broadFetch(
   question: string, nodeId: string, ctx: ResearchCtx, entities: string[], metrics: string[],
 ): Promise<{ findings: Finding[]; queries: string[]; calls: TakoCallRecord[]; graph: { entity: string; related: string[] }[]; metrics?: string[]; graphCalls?: GraphCallRecord[]; graphMs?: number }> {
-  const { queries, graph, metrics: planMetrics, graphCalls, graphMs } = await ctx.strategy.broadQueries(ctx, question, entities, metrics);
+  const { queries, graph, metrics: planMetrics, graphCalls, graphMs } = await ctx.strategy.broadQueries(ctx, question, entities, metrics, nodeId);
   ctx.queries.push(...queries);
 
   // Broad chart cards feed the synth; broad web sources are filtered into ctx.webSources.

@@ -45,6 +45,7 @@ export interface TraceNodeView {
 export type LiveStep =
   | { t: "reasoning"; nodeId: string; depth: number; question: string; kind: "branch" | "leaf" | "gap"; rationale?: string; entities?: string[]; metrics?: string[]; subQuestions?: string[] }
   | { t: "tako"; call: TakoCallRecord }
+  | { t: "graph"; nodeId: string; call: GraphCallRecord }
   | { t: "synth"; nodeId: string; phase: "start" | "end" };
 
 // Classify where a card came from, for the grounding dot. Trace cards always come
@@ -132,6 +133,9 @@ export function stepsToDisplay(steps: LiveStep[] | undefined): TraceNodeView[] {
       if (!v.calls.some((c) => c.callId === s.call.callId)) v.calls.push(s.call);
       v.findingCount = v.calls.reduce((sum, c) => sum + c.cards.length, 0);
       for (const q of [s.call.query]) if (!v.queries.includes(q)) v.queries.push(q);
+    } else if (s.t === "graph") {
+      const v = ensure(s.nodeId);
+      v.graphCalls.push(s.call);
     } else if (s.t === "synth") {
       const v = ensure(s.nodeId);
       v.synthesizing = s.phase === "start";

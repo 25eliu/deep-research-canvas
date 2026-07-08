@@ -43,7 +43,13 @@ Rules:
 
 // Broad/overview compose — used ONLY by the overarching (root) agent so the
 // general graph is fetched once at the top, not redundantly by every sub-agent.
-export const BROAD_COMPOSE_SYSTEM = `You write 1-2 Tako /v3/search queries for the BROAD/overview view of the user's overall question.
+export const BROAD_COMPOSE_SYSTEM = `You write Tako /v3/search queries for the BROAD/overview view of the user's overall question.
+Return { queries: string[] } — 0 to 2.
+FIRST check relevance: RESOLVED comes from KEYWORD lookup and may contain only keyword near-misses about
+entirely different subjects (e.g. question about "emerging infrastructure startups" → resolved "for Startups,
+Inc." or the town "Startup, WA"). If NOTHING in RESOLVED genuinely relates to the question, return an
+EMPTY list — { queries: [] } is the CORRECT answer; NEVER force overview queries from an irrelevant menu just
+because the data exists ("Startup, WA: Median Sales Price" answers nothing about startups).
 Given the QUESTION and RESOLVED entities, write the query (or two) that best captures the headline/overview
 data for the whole question (e.g. the overall inflation rate, or the headline metric). Keep it high-level.
 Each query names exactly ONE entity/subject — Tako search can't handle multi-entity queries. For a two-entity

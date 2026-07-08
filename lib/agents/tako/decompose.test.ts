@@ -44,6 +44,15 @@ describe("lookup-pair rules in prompts", () => {
     expect(COMPOSE_SYSTEM).toContain("keyword near-miss");
   });
 
+  // Same regression at the ROOT: the broad composer forced 1-2 queries even when the graph
+  // resolved junk ("Emerging infrastructure startups" → "for Startups, Inc." / "Startup, WA"
+  // → "Startup, WA: Median Sales Price"). Zero broad queries must be legal too.
+  it("broad compose may return ZERO queries when RESOLVED is irrelevant", () => {
+    expect(BROAD_COMPOSE_SYSTEM).toContain("0 to 2");
+    expect(BROAD_COMPOSE_SYSTEM).toContain("EMPTY list");
+    expect(BROAD_COMPOSE_SYSTEM).toContain("keyword near-miss");
+  });
+
   it("decompose targets one pair per question and splits any versus/and", () => {
     expect(DECOMPOSE_SYSTEM).toContain("ONE entity + ONE metric");
     expect(DECOMPOSE_SYSTEM).toContain(`every "and"`);

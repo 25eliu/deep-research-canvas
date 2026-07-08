@@ -121,6 +121,9 @@ export type AgentEvent =
     }
   // A per-sub-query Tako call, individually traceable, keyed by nodeId.
   | { type: "tako_call"; call: TakoCallRecord }
+  // A raw graph API call (search/related), streamed live so the trace shows graph
+  // activity per node while the run is in flight (the tree copy lands post-run).
+  | { type: "graph_call"; nodeId: string; call: GraphCallRecord }
   // Synthesis brackets — which findings/children feed a node's answer.
   | {
       type: "synthesis";

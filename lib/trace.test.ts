@@ -144,3 +144,19 @@ describe("gap-fill trace plumbing", () => {
     expect(views[0].kind).toBe("gap");
   });
 });
+
+// Live graph visibility: graph search/related calls must attach to their node in the
+// LIVE view too, not only in the authoritative post-run tree.
+describe("live graph calls", () => {
+  it("stepsToDisplay attaches live graph calls to their node", () => {
+    const views = stepsToDisplay([
+      { t: "reasoning", nodeId: "rq_x", depth: 1, question: "nvidia revenue", kind: "leaf" },
+      { t: "graph", nodeId: "rq_x", call: { endpoint: "graph/search", params: { q: "NVIDIA Corporation", types: "entity" }, ms: 40, results: [{ name: "NVIDIA Corporation" }] } },
+      { t: "graph", nodeId: "rq_x", call: { endpoint: "graph/related", params: { node_id: "nv-1", relation_type: "metric", q: "revenue" }, ms: 55, results: [{ name: "Total Revenue" }] } },
+    ]);
+    expect(views).toHaveLength(1);
+    expect(views[0].graphCalls).toHaveLength(2);
+    expect(views[0].graphCalls[0].endpoint).toBe("graph/search");
+    expect(views[0].graphCalls[1].results[0].name).toBe("Total Revenue");
+  });
+});

@@ -38,8 +38,10 @@ export interface QueryPlan {
 }
 
 export interface QueryStrategy {
-  leafQueries(ctx: ResearchCtx, question: string, entities: string[], metrics: string[]): Promise<QueryPlan>;
-  broadQueries(ctx: ResearchCtx, question: string, entities: string[], metrics: string[]): Promise<QueryPlan>;
+  // nodeId (when given) lets the graph phase stream each raw graph call live onto
+  // that research node's trace row ("graph_call" events).
+  leafQueries(ctx: ResearchCtx, question: string, entities: string[], metrics: string[], nodeId?: string): Promise<QueryPlan>;
+  broadQueries(ctx: ResearchCtx, question: string, entities: string[], metrics: string[], nodeId?: string): Promise<QueryPlan>;
 }
 
 interface ResolvedEntity {
@@ -60,35 +62,46 @@ function compactResult(n: GraphNode | GraphItem): GraphCallRecord["results"][num
 }
 
 // graphSearch/graphRelated, with the EXACT request params and (compacted) response
-// recorded into `rec` — the trace's per-node drill-down for graph-call debugging.
-// Failures are recorded too, then rethrown for the caller's existing handling.
+// recorded into `rec` — the trace's per-node drill-down for graph-call debugging —
+// and mirrored live via `onCall` (→ a "graph_call" event) so the streaming trace
+// shows graph activity as it happens. Failures are recorded too, then rethrown.
 async function recordedSearch(
   rec: GraphCallRecord[], q: string, opts: { types: "entity" | "metric"; subtype?: string; limit?: number },
+  onCall?: (c: GraphCallRecord) => void,
 ): Promise<GraphNode[]> {
   const params = { q, types: opts.types, ...(opts.subtype ? { subtype: opts.subtype } : {}), limit: opts.limit ?? 5 };
   const t = Date.now();
   try {
     const nodes = await graphSearch(q, opts);
-    rec.push({ endpoint: "graph/search", params, ms: Date.now() - t, results: nodes.map(compactResult) });
+    const call: GraphCallRecord = { endpoint: "graph/search", params, ms: Date.now() - t, results: nodes.map(compactResult) };
+    rec.push(call);
+    onCall?.(call);
     return nodes;
   } catch (e: unknown) {
-    rec.push({ endpoint: "graph/search", params, ms: Date.now() - t, results: [], error: errorMessage(e) });
+    const call: GraphCallRecord = { endpoint: "graph/search", params, ms: Date.now() - t, results: [], error: errorMessage(e) };
+    rec.push(call);
+    onCall?.(call);
     throw e;
   }
 }
 
 async function recordedRelated(
   rec: GraphCallRecord[], nodeId: string, opts: { relationType: "entity" | "metric"; q?: string; limit?: number },
+  onCall?: (c: GraphCallRecord) => void,
 ): Promise<GraphItem[]> {
   const q = opts.q?.trim();
   const params = { node_id: nodeId, relation_type: opts.relationType, ...(q ? { q } : {}), limit: opts.limit ?? 6 };
   const t = Date.now();
   try {
     const items = await graphRelated(nodeId, opts);
-    rec.push({ endpoint: "graph/related", params, ms: Date.now() - t, results: items.map(compactResult) });
+    const call: GraphCallRecord = { endpoint: "graph/related", params, ms: Date.now() - t, results: items.map(compactResult) };
+    rec.push(call);
+    onCall?.(call);
     return items;
   } catch (e: unknown) {
-    rec.push({ endpoint: "graph/related", params, ms: Date.now() - t, results: [], error: errorMessage(e) });
+    const call: GraphCallRecord = { endpoint: "graph/related", params, ms: Date.now() - t, results: [], error: errorMessage(e) };
+    rec.push(call);
+    onCall?.(call);
     throw e;
   }
 }
@@ -123,11 +136,13 @@ interface MetricDetail { name: string; aliases: string[]; description?: string }
 // top node's related siblings (co-table series) enrich the pool. Namespace-segregated:
 // the metric term is ONLY searched here, never as an entity — and vice versa.
 // Failures are notes, never throws.
-async function discoverMetrics(ctx: ResearchCtx, rec: GraphCallRecord[], term?: string): Promise<MetricDetail[]> {
+async function discoverMetrics(
+  ctx: ResearchCtx, rec: GraphCallRecord[], term?: string, onCall?: (c: GraphCallRecord) => void,
+): Promise<MetricDetail[]> {
   if (!term) return [];
   let nodes: GraphNode[] = [];
   try {
-    nodes = await recordedSearch(rec, term, { types: "metric", limit: METRIC_SEARCH_LIMIT });
+    nodes = await recordedSearch(rec, term, { types: "metric", limit: METRIC_SEARCH_LIMIT }, onCall);
   } catch (e: unknown) {
     ctx.notes.push(`metric graph search failed for "${term}" — ${errorMessage(e)}`);
     return [];
@@ -136,7 +151,7 @@ async function discoverMetrics(ctx: ResearchCtx, rec: GraphCallRecord[], term?: 
   const siblingsPerNode = await Promise.all(
     top.map(async (n) => {
       try {
-        return await recordedRelated(rec, n.id, { relationType: "metric", limit: METRIC_SIBLING_LIMIT });
+        return await recordedRelated(rec, n.id, { relationType: "metric", limit: METRIC_SIBLING_LIMIT }, onCall);
       } catch (e: unknown) {
         ctx.notes.push(`metric related fetch failed for "${n.name}" — ${errorMessage(e)}`);
         return [];
@@ -176,17 +191,21 @@ interface ResolvedGraph {
 // TOP 2 results of each — all relation_type=metric. Both top entity nodes become resolved
 // rows: keyword search can rank a junk node first ("Apple" → "Apples" the fruit above
 // "Apple Inc."), and giving the composer BOTH menus lets it ignore the wrong one.
-async function resolveGraph(ctx: ResearchCtx, entities: string[], metrics: string[]): Promise<ResolvedGraph> {
+async function resolveGraph(ctx: ResearchCtx, entities: string[], metrics: string[], researchNodeId?: string): Promise<ResolvedGraph> {
   const t = Date.now();
   const out: ResolvedEntity[] = [];
   const graphCalls: GraphCallRecord[] = [];
+  // Mirror each graph call live onto the issuing research node's trace row.
+  const onCall = researchNodeId && ctx.emit
+    ? (call: GraphCallRecord) => ctx.emit!({ type: "graph_call", nodeId: researchNodeId, call })
+    : undefined;
   const entityTerm = entities.map((e) => e.trim()).filter(Boolean)[0];
   const metricTerm = metrics.map((m) => m.trim()).filter(Boolean)[0];
   // Metric side runs concurrently with the entity side below.
-  const discovery = discoverMetrics(ctx, graphCalls, metricTerm);
+  const discovery = discoverMetrics(ctx, graphCalls, metricTerm, onCall);
   if (entityTerm) {
     try {
-      const nodes = await recordedSearch(graphCalls, entityTerm, { types: "entity" });
+      const nodes = await recordedSearch(graphCalls, entityTerm, { types: "entity" }, onCall);
       if (nodes.length === 0) ctx.notes.push(`No graph node for "${entityTerm}"`);
       await Promise.all(
         nodes.slice(0, ENTITY_NODES_PER_TERM).map(async (node) => {
@@ -196,11 +215,11 @@ async function resolveGraph(ctx: ResearchCtx, entities: string[], metrics: strin
             // "price"). NEVER by the whole question or the entity name — Tako's /related
             // ranks against metric NAMES, so a sentence/entity-name matches nothing and
             // returns 0 even when the node has hundreds of metrics.
-            let items = await recordedRelated(graphCalls, node.id, { relationType: "metric", q: metricTerm, limit: metricTerm ? 8 : 40 });
+            let items = await recordedRelated(graphCalls, node.id, { relationType: "metric", q: metricTerm, limit: metricTerm ? 8 : 40 }, onCall);
             if (items.length === 0 && metricTerm) {
               // The term was too specific to match — fetch the full (bounded) menu and let
               // the compose LLM pick. The safety net that surfaces what Tako actually has.
-              items = await recordedRelated(graphCalls, node.id, { relationType: "metric", limit: 40 });
+              items = await recordedRelated(graphCalls, node.id, { relationType: "metric", limit: 40 }, onCall);
             }
             ctx.related.push({ node: node.name, items: items.map((i) => i.name) });
             out.push({ entity: node.name, node: node.id, related: items.map((i) => ({ name: i.name, aliases: i.aliases || [], description: i.description })) });
@@ -354,14 +373,14 @@ function planGraph(resolved: ResolvedEntity[], discovered: MetricDetail[]): Quer
 }
 
 export const graphStrategy: QueryStrategy = {
-  async leafQueries(ctx, question, entities, metrics) {
-    const { resolved, discovered, metrics: allMetrics, graphCalls, graphMs } = await resolveGraph(ctx, entities, metrics);
+  async leafQueries(ctx, question, entities, metrics, nodeId) {
+    const { resolved, discovered, metrics: allMetrics, graphCalls, graphMs } = await resolveGraph(ctx, entities, metrics, nodeId);
     const graph = planGraph(resolved, discovered);
     const queries = await groundedQueries(ctx, question, resolved, entities, allMetrics, discovered);
     return { queries, graph, metrics: allMetrics, graphCalls, graphMs };
   },
-  async broadQueries(ctx, question, entities, metrics) {
-    const { resolved, discovered, metrics: allMetrics, graphCalls, graphMs } = await resolveGraph(ctx, entities, metrics);
+  async broadQueries(ctx, question, entities, metrics, nodeId) {
+    const { resolved, discovered, metrics: allMetrics, graphCalls, graphMs } = await resolveGraph(ctx, entities, metrics, nodeId);
     const graph = planGraph(resolved, discovered);
     const resolvedInfo = [
       ...resolved.map((r) => `${r.entity}: ${metricLines(r.related.slice(0, 5))}`),
