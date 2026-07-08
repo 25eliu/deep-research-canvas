@@ -73,6 +73,9 @@ Return { atomic: boolean, rationale: string, entity: string, metric: string, coh
 - When the prompt contains a COHORT_MEMBERS list, this IS the second pass: every sub-question names exactly
   ONE member from that list (copy the name verbatim as its \`entity\`) paired with the question's most
   decision-relevant metric; do not re-introduce the class and do not set \`cohort\` again.
+  COVER THE MEMBERS FIRST: one sub-question per member (each with that single most decision-relevant metric)
+  before ANY member gets a second metric — a member without a sub-question is wasted grounding, and the gap
+  round + final report handle the remaining facets.
 - rationale: 1-2 plain sentences explaining WHY you chose atomic vs. split, and what the plan is. This is shown to
   the user as your reasoning for this step — be specific and concrete (name the facets or the single pair).
 - Each sub-question MAY carry its own short rationale (why that facet matters to the overall question).
