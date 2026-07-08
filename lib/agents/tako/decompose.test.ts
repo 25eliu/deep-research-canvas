@@ -53,6 +53,15 @@ describe("lookup-pair rules in prompts", () => {
     expect(BROAD_COMPOSE_SYSTEM).toContain("keyword near-miss");
   });
 
+  // Regression: metric-side keyword traps. For a GLP-1 adoption question the metric search
+  // confirmed "AI Adoption Rate" (shares the keyword "adoption") and it got queried. The
+  // composer must test each metric's TOPIC against the sub-question, not keyword overlap.
+  it("compose demands per-metric topical relevance, not keyword overlap", () => {
+    expect(COMPOSE_SYSTEM).toContain("sharing a keyword is NOT relevance");
+    expect(COMPOSE_SYSTEM).toContain("AI Adoption Rate");
+    expect(COMPOSE_SYSTEM).toContain("GLP-1");
+  });
+
   it("decompose targets one pair per question and splits any versus/and", () => {
     expect(DECOMPOSE_SYSTEM).toContain("ONE entity + ONE metric");
     expect(DECOMPOSE_SYSTEM).toContain(`every "and"`);

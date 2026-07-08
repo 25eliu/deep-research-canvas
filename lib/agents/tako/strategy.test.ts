@@ -243,15 +243,20 @@ describe("graphStrategy metric discovery (metric namespace side)", () => {
     expect(ctx.notes.some((n) => n.includes("metric graph search failed"))).toBe(true);
   });
 
-  it("falls back to mechanical entity×metric pairs, using the DISCOVERED canonical metric", async () => {
+  it("falls back to mechanical entity×metric pairs from the PLANNER terms only", async () => {
+    // Regression (GLP-1 → "AI Adoption Rate"): graph metric discovery keyword-matches series
+    // about unrelated topics; when compose keeps nothing, the no-LLM fallback must NOT pair the
+    // entity with discovered names — only the planner's own term. Relevance of discovered names
+    // is the compose LLM's call; the mechanical ladder cannot judge it.
     h.searchNodes = [TESLA];
     h.metricNodesByTerm = { revenue: [{ id: "m1", name: "Total Revenue", type: "metric" }] };
     h.relatedByNode = { m1: [] };
     h.relatedByCall = [[{ name: "Employee Count", aliases: [] }]];
     h.grounded = []; // compose keeps nothing → mechanical fallback
     const plan = await graphStrategy.leafQueries(stubCtx(), "how much does Tesla earn?", ["Tesla"], ["revenue"]);
-    expect(plan.queries).toContain("Tesla Total Revenue"); // fallback composed from the DISCOVERED metric
-    expect(plan.metrics).toEqual(["revenue", "Total Revenue"]);
+    expect(plan.queries).toContain("Tesla revenue"); // planner pair only
+    expect(plan.queries).not.toContain("Tesla Total Revenue"); // discovered names never reach the fallback
+    expect(plan.metrics).toEqual(["revenue", "Total Revenue"]); // trace enrichment unchanged
   });
 
   it("ONE grounded-compose over the full deterministic list — question-style queries (shelter repro)", async () => {

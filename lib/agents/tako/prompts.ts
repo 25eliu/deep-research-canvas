@@ -36,7 +36,10 @@ Rules:
   aliases — AND name a concrete subject (the entity, or the geography a standalone series implies).
   Never a bare metric name alone; never a metric that is not in RESOLVED.
 - Pick ONLY metrics that answer the SUB_QUESTION. RESOLVED contains fuzzy matches about unrelated subjects —
-  ignore them entirely.
+  ignore them entirely. Judge each metric by its TOPIC, not its words: sharing a keyword is NOT relevance.
+  A sub-question about GLP-1 adoption does NOT want "AI Adoption Rate" (same word "adoption", different
+  topic entirely). Ask of every candidate: does this series measure the thing the sub-question is about?
+  If no listed metric passes that test, return fewer queries — or the empty list.
 - Each query targets a DISTINCT data point/angle — no paraphrases or reworded restatements of another query.
   NEVER generic "overview"/"ratios"/whole-entity summary queries — a parent agent already owns the broad view.
 - When RESOLVED is "(none)", compose 1-3 specific data questions directly from the SUB_QUESTION.`;

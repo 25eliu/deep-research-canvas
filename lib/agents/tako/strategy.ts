@@ -376,7 +376,11 @@ export const graphStrategy: QueryStrategy = {
   async leafQueries(ctx, question, entities, metrics, nodeId) {
     const { resolved, discovered, metrics: allMetrics, graphCalls, graphMs } = await resolveGraph(ctx, entities, metrics, nodeId);
     const graph = planGraph(resolved, discovered);
-    const queries = await groundedQueries(ctx, question, resolved, entities, allMetrics, discovered);
+    // The fallback inside groundedQueries gets the PLANNER metrics only — graph-discovered
+    // names are keyword matches whose topical relevance only the compose LLM can judge
+    // (GLP-1 "adoption" → "AI Adoption Rate" was mechanically paired and searched). The
+    // enriched list still goes out in the plan for the trace/tree.
+    const queries = await groundedQueries(ctx, question, resolved, entities, metrics, discovered);
     return { queries, graph, metrics: allMetrics, graphCalls, graphMs };
   },
   async broadQueries(ctx, question, entities, metrics, nodeId) {
