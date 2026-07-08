@@ -2,6 +2,11 @@ import { defineConfig } from "vitest/config";
 import { resolve } from "node:path";
 
 export default defineConfig({
-  test: { environment: "node", include: ["lib/**/*.test.ts"] },
+  esbuild: { jsx: "automatic" }, // Next's tsconfig says "preserve"; tests need real JSX transform
+  test: {
+    environment: "node",
+    include: ["lib/**/*.test.ts", "components/**/*.test.tsx"],
+    environmentMatchGlobs: [["components/**", "jsdom"]],
+  },
   resolve: { alias: { "@": resolve(__dirname, ".") } },
 });
