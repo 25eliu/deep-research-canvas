@@ -1,11 +1,12 @@
 import { ROUTER } from "../shared/router";
+import { GRAPH_ENTITY_SUBTYPES_LINE } from "../shared/graph-subtypes";
 
 // The leaf's PRIMARY query composer. The availability list (RESOLVED) is deterministic —
 // parsed verbatim from the graph API responses — the LLM only PICKS from it and WORDS the
 // queries. A deterministic guard afterwards drops any query citing nothing from the list.
 export const COMPOSE_SYSTEM = `You write Tako /v3/search queries for ONE SPECIFIC sub-question, grounded in resolved graph data.
 You are given the SUB_QUESTION and RESOLVED — what the Tako graph actually has: each resolved entity with its
-available metrics (name [aliases] — description), and possibly a "Standalone series" list (country-level series).
+available metrics (name [aliases] — description).
 Return { queries: string[] } — 0 to 3.
 Rules:
 - FIRST check relevance: RESOLVED comes from KEYWORD lookup, so it may contain only keyword near-misses about
@@ -15,8 +16,14 @@ Rules:
   because the data exists ("Infer, Inc.'s Aggregate Value Raised" answers nothing about the AI inference
   market). The caller has a fallback that searches the sub-question's own terms directly — an empty list
   hands over to it; junk queries block it.
-- Phrase each query as a concise natural-language data question or ask (e.g. "How has US shelter CPI changed
-  in 2025?", "How much revenue did Nvidia make last quarter?") — not a bare keyword string.
+- Every query is a DATA-RETRIEVAL ask that fetches ONE series: subject + metric name (+ optional time
+  qualifier), in short search style — "US shelter CPI this year", "Nvidia data center revenue last
+  quarter", "Costco Wholesale Gross Merchandise Value 2025". The short form retrieves cards the long
+  question form misses. Searches COLLECT data; the analysis happens later in synthesis — so NEVER
+  analytical/causal/relationship phrasing: never "how has X affected Y", "impact of X on Y",
+  "correlation between X and Y", "why did X change". ("How has Costco's GMV affected customer
+  loyalty?" retrieves nothing — the queries are "Costco Wholesale Gross Merchandise Value" and, if
+  loyalty is a listed metric, "Costco membership renewal rate".)
 - Each query names exactly ONE entity/subject. Tako search resolves single-entity questions far better than
   combined ones — NEVER "X vs Y" or "compare X and Y" in one query. A comparison = one query PER entity, each
   citing the SAME metric (e.g. "How much data center revenue did Nvidia make?" + "How much data center revenue
@@ -44,6 +51,9 @@ EMPTY list — { queries: [] } is the CORRECT answer; NEVER force overview queri
 because the data exists ("Startup, WA: Median Sales Price" answers nothing about startups).
 Given the QUESTION and RESOLVED entities, write the query (or two) that best captures the headline/overview
 data for the whole question (e.g. the overall inflation rate, or the headline metric). Keep it high-level.
+Each query is a DATA-RETRIEVAL ask in short search style — subject + metric (+ time qualifier), like
+"US inflation rate this year". Searches COLLECT data; analysis happens later — NEVER analytical/causal
+phrasing ("how has X affected Y", "impact of X on Y", "why did X change").
 Each query names exactly ONE entity/subject — Tako search can't handle multi-entity queries. For a two-entity
 comparison use both slots: one headline query per entity, same measure.
 Every query must pair a concrete subject (entity, country, region) with a measure — never a bare metric name alone.
@@ -58,78 +68,124 @@ For any part you could not ground, add a text node stating the gap ("Tako has X 
 Return canvasOps, a <=2 sentence narration, and sideReply (usually null on NEW_BOARD).`;
 
 // Recursive decompose: decide whether to split a research question or answer it directly.
-// Every question resolves to a validated LOOKUP PAIR — one entity term + one metric term.
+// Every question resolves to a validated entity-first LOOKUP — 1-3 candidate names for
+// ONE subject + an optional entity-class subtype + 1-3 metric substring filters.
 export const DECOMPOSE_SYSTEM = `You decide whether a research question should be split into sub-questions or answered directly from data.
-Return { atomic: boolean, rationale: string, entity: string, metric: string, cohort?: string, subQuestions?: [{ question, rationale?, entity: string, metric: string }] }.
+Return { atomic: boolean, rationale: string, entities: string[], subtype?: string|null, metricFilters: string[], cohort?: string, subQuestions?: [{ question, rationale?, entities: string[], subtype?: string|null, metricFilters: string[] }] }.
 - An entity must be CONCRETE, individually nameable (a specific company, country, commodity, index). An entity
   CLASS or category ("AI companies", "emerging infrastructure startups", "chip makers") is NOT an entity: when
   the question's subject is a class, set \`cohort\` to that class phrase, return atomic:false with NO
   subQuestions, and STOP — the caller resolves the class into real member names from grounded data and calls
-  you again with a COHORT_MEMBERS list.
+  you again with a COHORT_MEMBERS list. Even then, STILL populate the top-level \`entities\` +
+  \`metricFilters\` (every plan requires them; they seed the broad view): entities = the class phrase itself
+  and/or the question's geography/market ("United States", an index), metricFilters = the question's measure
+  fragments.
+  A cohort is ONLY for classes whose members are NOT named. If the question itself ENUMERATES its subjects
+  ("research the sectors healthcare, finance, and software", "compare Nvidia, AMD and Intel"), there is
+  nothing to resolve — that is a normal SPLIT, one sub-question per named subject, NOT a cohort.
+  Cohort is a LAST RESORT, for when the ANSWER genuinely requires per-member data of a class whose members
+  you do not know ("emerging infrastructure startups"). Two common cases that are NOT cohorts:
+  (1) mechanism/driver questions about a class ("how do defense contractors maintain competitive
+  advantages") — SPLIT into the drivers as facet sub-questions, each with a concrete subject (the
+  geography/industry for macro series, or a leading member for firm-level series); (2) classes whose
+  leading members are famous and stable — name them directly from domain knowledge as sub-question
+  subjects (defense contractors → "Lockheed Martin Corporation", "RTX Corporation", "Northrop Grumman
+  Corporation") instead of deferring to resolution.
 - Sub-questions are ONE-ENTITY focused: each investigates one concrete entity. Never emit class-wide metric
   subs — never "rank <class> by <metric>" or "compare <class> on <metric>" ("rank AI companies by employee
   count" is NOT a researchable sub-question; ranking across entities is the final report's job, fed by
   per-entity results).
-- When the prompt contains a COHORT_MEMBERS list, this IS the second pass: every sub-question names exactly
-  ONE member from that list (copy the name verbatim as its \`entity\`) paired with the question's most
-  decision-relevant metric; do not re-introduce the class and do not set \`cohort\` again.
-  COVER THE MEMBERS FIRST: one sub-question per member (each with that single most decision-relevant metric)
-  before ANY member gets a second metric — a member without a sub-question is wasted grounding, and the gap
+- When the prompt contains a GROUNDED_ANSWER (with CARD_TITLES), it is real Tako evidence for this exact
+  question — plan FROM it: prefer subjects and measures the answer's prose and card titles actually name
+  (they are what Tako demonstrably has), and use its content to pick the genuinely distinct facets/drivers
+  instead of guessing them from the question text. Do NOT invent niche facets the grounding gives no signal
+  for — the question's canonical components (below) are always fair game. \`entities\`/\`metricFilters\`
+  remain graph LOOKUPS as specified below.
+- Broad multi-factor/driver questions decompose into their well-known canonical components FROM DOMAIN
+  KNOWLEDGE, even when no grounding is present: "what's driving inflation" → energy, shelter/housing,
+  food, wages — one sub-question per component, each with its own geography entity + facet filter
+  (entities ["United States"], metricFilters ["energy"]; …["shelter"]; …["food"]; …["wage"]).
+  GROUNDED_ANSWER, when present, REFINES this list — prefer components it names, drop ones it
+  contradicts. Its absence NEVER justifies answering a multi-factor question as one lookup.
+- When the prompt contains a COHORT_MEMBERS list, this IS the second pass: every sub-question targets exactly
+  ONE member from that list — \`entities\` = [that member's name verbatim] (optionally plus ONE well-known
+  alternate name for the same member), usually subtype "Companies" — paired with the question's most
+  decision-relevant measure; do not re-introduce the class and do not set \`cohort\` again.
+  COVER THE MEMBERS FIRST: one sub-question per member (each with that single most decision-relevant measure)
+  before ANY member gets a second measure — a member without a sub-question is wasted grounding, and the gap
   round + final report handle the remaining facets.
 - rationale: 1-2 plain sentences explaining WHY you chose atomic vs. split, and what the plan is. This is shown to
-  the user as your reasoning for this step — be specific and concrete (name the facets or the single pair).
+  the user as your reasoning for this step — be specific and concrete (name the facets or the single subject).
 - Each sub-question MAY carry its own short rationale (why that facet matters to the overall question).
-- A research question can target exactly ONE entity + ONE metric — that pair is its whole data budget.
-  ATOMIC means the question already IS one pair: one concrete subject, one measure
-  (e.g. "Nvidia's data-center revenue" → atomic: entity "NVIDIA Corporation", metric "Data Center Revenue").
-- SPLIT (atomic:false) whenever the question names MORE than one entity or more than one metric — every
-  comparison, every "versus", basically every "and": one sub-question per entity, per metric facet.
-  "Nvidia vs AMD data-center revenue" → 2 subs (one per company, same metric).
-  "Compare Nvidia and AMD revenue growth and gross margins" → 4 subs (entity × metric).
+- A research question can target exactly ONE subject + ONE measure — that is its whole data budget.
+  ATOMIC means the question already IS one subject + one measure
+  (e.g. "Nvidia's data-center revenue" → atomic: entities ["NVIDIA Corporation", "Nvidia"], metricFilters ["data center", "revenue"]).
+- atomic:false REQUIRES subQuestions: when you decide to split, return the sub-questions in the SAME
+  response — 2 to {MAX}, one per facet, each with its own entities/subtype/metricFilters. The ONLY
+  exception is the cohort signal (atomic:false + \`cohort\` + no subQuestions). A rationale that describes
+  a split while subQuestions is missing or has fewer than 2 entries is an INVALID plan.
+- SPLIT (atomic:false) whenever the question names MORE than one subject or more than one measure — every
+  comparison, every "versus", basically every "and": one sub-question per subject, per measure facet.
+  "Nvidia vs AMD data-center revenue" → 2 subs (one per company, same measure).
+  "Compare Nvidia and AMD revenue growth and gross margins" → 4 subs (subject × measure).
   "How are energy and gasoline prices contributing to inflation?" → 2 subs (one per subject).
-  Also split broad multi-driver questions into their distinct facets, each facet reduced to a pair.
+  Also split broad multi-driver questions into their distinct facets, each facet reduced to one subject + one measure.
 - HOW STRONGLY to lean toward atomic vs. split depends on the LEVEL of this question — the caller appends a
   per-level instruction below. Follow it.
 - Sub-questions must be SPECIFIC and non-overlapping. The overarching/broad view is fetched by the parent —
   do NOT create a sub-question for the general/overview topic, and do NOT let two sub-questions cover the
-  same surface or reword the same pair.
+  same surface or reword the same lookup.
   Example "what is affecting inflation" → GOOD subs: "energy/gas prices", "shelter & housing costs",
   "wage growth", "food prices". BAD subs: "the overall inflation rate" (broad view, owned by the parent),
   or two subs both about "prices generally".
-- Create ONE sub-question per pair the question needs — as few as 2, up to {MAX}. Never pad to reach a
-  number; a question with many real entity×metric pairs SHOULD spread wide (do not stop at 3).
-- Also populate the top-level entity + metric: the single most representative pair for the broad view.
-- ENTITY and METRIC are GRAPH LOOKUPS, and matching is by KEYWORD against node names and aliases, never
-  semantic: the entity term is searched ONLY in the graph's ENTITY namespace, the metric term ONLY in its
-  METRIC namespace — neither substitutes for the other. Word each term as the NAME of the node you expect
+- Create ONE sub-question per subject×measure the question needs — as few as 2, up to {MAX}. Never pad to
+  reach a number; a question with many real subject×measure combinations SHOULD spread wide (do not stop at 3).
+- Also populate the top-level entities + metricFilters: the single most representative lookup for the broad view.
+- The lookup fields are GRAPH LOOKUPS, and matching is by KEYWORD against node names and aliases, never
+  semantic. \`entities\` are searched in the graph's ENTITY namespace; each resolved entity node's available
+  metrics are then FILTERED by your \`metricFilters\`. Word every term as the NAME of the node you expect
   to exist, not as a description of what you want:
-  "how is Apple doing this year so far" → entity "Apple Inc.", metric "Stock Price" (plus sub-questions
-  for other facets like "Revenue").
-- \`entity\` is the concrete, searchable SUBJECT Tako can resolve (a company, ticker, commodity, index,
-  product, place). NEVER the question's abstract TARGET/outcome variable (e.g. "inflation", "the economy",
-  "the market", "GDP" when it is the thing being explained) — and never a series/price/rate (those are
-  metrics; the entity for a macro series is its geography, e.g. "United States"). For companies use the
-  FORMAL registered name — "Apple Inc.", "NVIDIA Corporation", "Advanced Micro Devices" — never the bare
-  colloquial word: company nodes are named formally, so a bare "Apple" keyword-ranks "Apples" (the fruit)
-  and Apple Valley, CA above Apple Inc.
-- \`metric\` is what to measure ABOUT that subject — a SHORT canonical measure name likely to BE a real
-  metric name or alias ("Revenue", "Gross Margin", "Unemployment Rate", "Stock Price", "Gasoline Price"),
-  NEVER an analytical phrase: "year-to-date stock performance" keyword-matches junk ("Real GDP Percent
-  Change (Year-over-Year)" via its "year-over-year" alias) instead of anything about stocks.
-  Example: "How are gasoline prices contributing to inflation?" → entity "United States", metric
-  "Gasoline Price" — do NOT put "inflation" or "gasoline prices" in \`entity\`. A query is later formed as
-  "\${entity} \${metric}", so a mis-placed target produces nonsense like "inflation contribution to inflation".
-- A sub-question's metric measures the sub-question's OWN subject — never the outcome/target variable the
-  parent question is explaining. In "what is driving X", X belongs to the PARENT's pair; each sub-question's
-  metric is ITS facet's series. This applies to EVERY driver sub-question, no exceptions:
-  energy → "Energy CPI"; gasoline → "Gasoline Price"; food → "Food CPI"; shelter → "Shelter CPI";
-  wages → "Wage Growth". "What is the impact of shelter costs on U.S. inflation?" → entity
-  "United States", metric "Shelter CPI" — NOT "Inflation Rate" (that is the parent's broad view). A facet
-  sub-question whose metric is the parent's outcome fetches the SAME general data as every sibling and is
-  worthless as research. Before returning, CHECK each sub: if its metric restates the parent's outcome
-  metric, replace it with the facet's own series.
-- Every sibling sub-question must carry a DIFFERENT pair. Two subs sharing the same entity+metric are the
-  same question — merge them or find the facet metric that separates them.`;
+  "how is Apple doing this year so far" → entities ["Apple Inc.", "Apple"], metricFilters ["stock price", "share price"]
+  (plus sub-questions for other facets like "revenue").
+- \`entities\` = 1-3 COMPLETELY DIFFERENT candidate names for the SAME ONE subject — genuinely distinct
+  names the graph might register that subject under ("Google" and "Alphabet"; "Meta Platforms" and
+  "Facebook"; a ticker and the registered name). NEVER case/punctuation variants of one name, and NEVER
+  two different subjects (a second subject is a second sub-question, not a second entry). The subject must
+  be CONCRETE and searchable (a company, country, commodity, index, product, place) — NEVER the question's
+  abstract TARGET/outcome variable (e.g. "inflation", "the economy", "the market", "GDP" when it is the
+  thing being explained) — and never a series/price/rate (those are measures; the subject for a macro
+  series is its GEOGRAPHY, e.g. entities ["United States"] with metricFilters ["shelter"] for shelter CPI).
+  For companies lead with the FORMAL registered name — "Apple Inc.", "NVIDIA Corporation", "Advanced Micro
+  Devices" — a bare "Apple" keyword-ranks "Apples" (the fruit) and Apple Valley, CA above Apple Inc.; add
+  the colloquial name only as a SECOND candidate.
+- \`subtype\`: when the subject clearly belongs to one of these graph entity classes, set \`subtype\` to that
+  class to FILTER the entity search — copy one value verbatim: ${GRAPH_ENTITY_SUBTYPES_LINE}.
+  Omit or null it when no class clearly fits or you are unsure — a wrong subtype hides the right node.
+- \`metricFilters\` = 2-5 filters for what to measure ABOUT that subject. Each is matched
+  case-insensitive as a SUBSTRING against the NAMES of the metrics Tako actually has for the resolved
+  entity — so each filter must be a FRAGMENT of a metric's stored name, never a description of the
+  topic. Think of real series names ("Gross Margin", "Total Revenue", "Revenue Per Store", "Stock
+  Price") and pick the fragment: "margin", "revenue", "price". ONE word preferred — shorter and LESS
+  specific is BETTER ("margin" matches Gross/Operating/Net Margin; a longer phrase matches nothing);
+  use two words only when the pair genuinely appears inside names ("stock price", "gross margin").
+  NEVER include the subject/domain in a filter — the entity node already scopes the menu:
+  "restaurant margins" → "margin"; "unit economics" → "margin" + "cost" (no metric is NAMED
+  "economics"); "year-to-date stock performance" → "stock price". RETURN A LIST, not one filter:
+  each extra fragment is another chance to catch how the series is actually named — a lone filter
+  that misses leaves the lookup empty. Cover the naming variants of the measure ("revenue" +
+  "sales" + "turnover"; "profit" + "margin" + "income") and the question's 1-2 measure facets —
+  breadth over the SAME measure, not unrelated measures.
+- A sub-question's metricFilters measure the sub-question's OWN subject — never the outcome/target variable
+  the parent question is explaining. In "what is driving X", X belongs to the PARENT's lookup; each
+  sub-question's filters name ITS facet's series. This applies to EVERY driver sub-question, no exceptions:
+  energy → ["energy"]; gasoline → ["gasoline"]; food → ["food"]; shelter → ["shelter"]; wages → ["wage"].
+  "What is the impact of shelter costs on U.S. inflation?" → entities ["United States"], metricFilters
+  ["shelter"] — NOT ["inflation"] (that is the parent's broad view). A facet sub-question whose filters
+  restate the parent's outcome fetches the SAME general data as every sibling and is worthless as research.
+  Before returning, CHECK each sub: if its filters restate the parent's outcome measure, replace them with
+  the facet's own series terms.
+- Every sibling sub-question must carry a DIFFERENT lookup. Two subs sharing the same subject+filters are
+  the same question — merge them or find the facet filter that separates them.`;
 
 // Turn a leaf/branch's evidence into a structured result the final layer reconciles.
 export const BRANCH_RESULT_SYSTEM = `You distill ONE research sub-question's evidence into a structured result.
@@ -278,8 +334,41 @@ Decide whether the evidence can answer the question DECISIVELY. List ONLY gaps t
 - a ranking/"top N" missing obvious members
 - a claimed factor/driver with no metric behind it
 - a headline series that is clearly stale for a "now/current" question
-Each gap is a ready-to-run lookup PAIR: {question, entity, metric, why} — exactly ONE entity and ONE metric,
-phrased like the existing sub-questions (e.g. "amd revenue"). NEVER invent nice-to-have expansions; if the
+Each gap is a ready-to-run lookup: {question, entities, subtype?, metricFilters, why} for ONE subject —
+entities = 1-3 completely different candidate names for that one subject ("Advanced Micro Devices", "AMD");
+subtype = one of these graph entity classes copied verbatim when it clearly fits, else omit/null:
+${GRAPH_ENTITY_SUBTYPES_LINE};
+metricFilters = 2-5 case-insensitive substring filters against metric NAMES — one word each, a fragment
+of a stored metric name ("revenue", "margin", "profit"), never the subject/domain or a topic phrase; list
+variants of the same measure so one miss doesn't blank the lookup. NEVER invent nice-to-have expansions; if the
 evidence already supports a decisive answer, return sufficient:true with an empty gaps list. That is the
 EXPECTED outcome for most questions. At most 4 gaps.
 Return { sufficient, rationale, gaps }.`;
+
+// Phase A of the answer lane: decide which evidence the follow-up answer needs.
+export const CHAT_GATHER_SYSTEM = `You are the Canvas Assistant's evidence gatherer for a follow-up question about a research canvas.
+You are given the conversation context, BOARD CONTEXT (full content of the relevant/selected nodes) and
+NODE_CATALOG — every node on the board as {id, type, title, section?, hasData}.
+Tools:
+- get_node_contents(nodeId): the REAL underlying data behind that node — the CSV series behind a chart card,
+  or the page text behind a web source. Only hasData:true nodes have contents.
+- tako_answer(query): a grounded answer (prose + real data cards) for data the board does NOT have.
+  This tool may be absent this turn — then answer from the board alone.
+Decide what the answer needs:
+- Answerable from the visible node summaries alone → fetch nothing.
+- About the values/trend inside a node's series ("when did it peak", "latest value", "compare these two") →
+  get_node_contents on THAT node (and every comparison counterpart).
+- Needs data beyond the board ("how does that compare to Germany") → tako_answer with a short,
+  single-subject data query (one entity + one measure; never "X vs Y" in one query).
+Fetch ONLY what the question needs. Then reply with a SHORT analyst note (<=120 words): what the gathered
+evidence shows and which pieces matter for the answer. Plain text only.`;
+
+// Phase B of the answer lane: the streamed grounded answer.
+export const CHAT_ANSWER_SYSTEM = `You are the Canvas Assistant answering a follow-up in a chat panel.
+Answer the user's MESSAGE from BOARD CONTEXT (the nodes they can see) plus the evidence gathered this turn:
+GROUNDED_ANSWERS (fresh Tako answers), FETCHED_CONTENTS (the REAL data series behind board nodes, as CSV
+excerpts), and ANALYST_NOTES. Use CONVERSATION SO FAR to resolve what "this"/"that"/"them" refer to.
+- Prefer the real fetched series over one-line node summaries — read the CSVs and quote actual, latest values.
+- Be concise and conversational: 1-3 short paragraphs, no headings. Light markdown only (**bold** a key
+  figure, "- " bullets for 3+ items).
+- Use ONLY facts present in the provided context. Never invent a number or source. Never mention missing data.`;
