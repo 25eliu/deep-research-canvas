@@ -67,11 +67,25 @@ describe("runTako lane dispatch", () => {
     expect(runTakoInitial).toHaveBeenCalledTimes(1);
   });
 
+  it("REPLACE on a non-empty board clears the existing board before the pipeline rebuilds it", async () => {
+    vi.mocked(generateStructured).mockResolvedValueOnce({ action: "REPLACE", reason: "new topic" } as any);
+    const emitted: unknown[] = [];
+    const emit = vi.fn((e: unknown) => emitted.push(e));
+    const res = await runTako(req, emit);
+    // The remove op is emitted live, ahead of anything the pipeline itself emits
+    // (the mocked pipeline emits nothing, so we just assert emit received it).
+    expect(emitted).toContainEqual({ type: "ops", ops: [{ op: "remove_node", id: "nvda", cascade: true }] });
+    // ...and prepended to the finalized op set returned to the caller.
+    expect(res.canvasOps[0]).toEqual({ op: "remove_node", id: "nvda", cascade: true });
+  });
+
   it("empty board runs the initial pipeline WITHOUT a router call", async () => {
     const res = await runTako({ ...req, canvasState: { nodes: [], edges: [] }, selection: undefined });
     expect(generateStructured).not.toHaveBeenCalled();
     expect(runTakoInitial).toHaveBeenCalledTimes(1);
     expect(res.trace?.action).toBe("REPLACE");
+    // Nothing to clear on an empty board — no remove ops.
+    expect(res.canvasOps.some((o: any) => o.op === "remove_node")).toBe(false);
   });
 
   it("router hard-failure defaults to the answer lane", async () => {

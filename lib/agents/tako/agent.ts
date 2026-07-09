@@ -1,4 +1,4 @@
-import type { AgentRequest, AgentResponse } from "../../schema";
+import type { AgentRequest, AgentResponse, CanvasOp } from "../../schema";
 import type { EmitFn, RouteAction } from "../shared/types";
 import { generateStructured } from "../../llm";
 import { sanitizeOps } from "../../sanitize";
@@ -42,7 +42,18 @@ export async function runTako(
   const folded = await foldHistory({ turns: req.history ?? [], priorSummary: req.historySummary }, summarizeTurns);
   const historyText = folded.historyText;
 
+  const hasBoard = req.canvasState.nodes.length > 0;
   const action = await routeTurn(req, historyText, emit);
+
+  // The router's REPLACE contract is that its ops replace the board, not merge
+  // into it — clear every existing node before the pipeline rebuilds it. Emitted
+  // live (so the client clears immediately) and prepended to the finalized ops;
+  // these never go through sanitize/finalize since they carry no node payload.
+  const removeOps: CanvasOp[] =
+    action === "REPLACE" && hasBoard
+      ? req.canvasState.nodes.map((n) => ({ op: "remove_node", id: n.id, cascade: true }))
+      : [];
+  if (removeOps.length) emit?.({ type: "ops", ops: removeOps });
 
   const result =
     action === "REPLACE" ? await runTakoInitial(req, emit, strategy)
@@ -59,7 +70,7 @@ export async function runTako(
   const ops = finalizeOps(req.canvasState, provenanced);
 
   return {
-    canvasOps: ops,
+    canvasOps: [...removeOps, ...ops],
     narration: result.narration,
     sideReply: result.sideReply,
     memory: { summary: folded.summary, summarizedThrough: folded.summarizedThrough },
