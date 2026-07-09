@@ -6,6 +6,7 @@ import { finalizeOps } from "../../relate";
 import { ctxBlock } from "../shared/ctx";
 import { ROUTER, zRoute } from "../shared/router";
 import { foldHistory, summarizeTurns } from "../shared/memory";
+import { logError } from "../../log";
 import { runTakoInitial } from "./pipeline";
 import { runTakoFollowup } from "./followup";
 import { graphStrategy, type QueryStrategy } from "./strategy";
@@ -27,7 +28,8 @@ async function routeTurn(req: AgentRequest, historyText: string, emit?: EmitFn):
       label: "route",
     });
     return route.action;
-  } catch {
+  } catch (e: unknown) {
+    logError("tako", "router failed — defaulting to EXPLAIN", { error: e instanceof Error ? e.message : String(e) });
     return "EXPLAIN";
   }
 }
