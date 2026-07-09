@@ -9,14 +9,18 @@ vi.mock("../shared/memory", () => ({
   summarizeTurns: vi.fn(),
 }));
 vi.mock("./strategy", () => ({ graphStrategy: {} }));
-const runTakoFollowup = vi.fn(async (..._args: unknown[]) => ({
+
+const emptyResult = () => ({
   nodeOps: [], narration: "", sideReply: "ok", validCardIds: new Set(), allowedNodeIds: new Set(),
   trace: { groundedIn: { nodes: [{ id: "nvda", title: "N" }], takoAnswerUsed: false, cards: [] } },
-}));
+});
+const runTakoFollowup = vi.fn(async (..._args: unknown[]) => emptyResult());
 vi.mock("./followup", () => ({ runTakoFollowup: (...a: any[]) => runTakoFollowup(...a) }));
-vi.mock("./pipeline", () => ({ runTakoInitial: vi.fn() }));
+const runTakoInitial = vi.fn(async (..._args: unknown[]) => ({ ...emptyResult(), sideReply: null, trace: {} }));
+vi.mock("./pipeline", () => ({ runTakoInitial: (...a: any[]) => runTakoInitial(...a) }));
 
 import { runTako } from "./agent";
+import { generateStructured } from "../../llm";
 import { foldHistory } from "../shared/memory";
 
 const req: AgentRequest = {
@@ -30,7 +34,7 @@ const req: AgentRequest = {
 
 beforeEach(() => vi.clearAllMocks());
 
-describe("runTako", () => {
+describe("runTako routing", () => {
   it("folds history and threads action + historyText into the follow-up", async () => {
     const res = await runTako(req);
     expect(foldHistory).toHaveBeenCalledTimes(1);
@@ -39,5 +43,32 @@ describe("runTako", () => {
     expect(historyArg).toBe("HIST");
     expect(res.memory).toEqual({ summary: "NEWSUM", summarizedThrough: "m3" });
     expect(res.trace?.groundedIn?.nodes[0].id).toBe("nvda");
+  });
+
+  it("empty board runs the initial pipeline WITHOUT a router call", async () => {
+    const res = await runTako({ ...req, canvasState: { nodes: [], edges: [] }, selection: undefined });
+    expect(generateStructured).not.toHaveBeenCalled();
+    expect(runTakoInitial).toHaveBeenCalledTimes(1);
+    expect(res.trace?.action).toBe("REPLACE");
+  });
+
+  it("REPLACE on a non-empty board runs the initial pipeline", async () => {
+    vi.mocked(generateStructured).mockResolvedValueOnce({ action: "REPLACE", reason: "new topic" } as any);
+    await runTako(req);
+    expect(runTakoInitial).toHaveBeenCalledTimes(1);
+    expect(runTakoFollowup).not.toHaveBeenCalled();
+  });
+
+  it("router hard-failure defaults to EXPLAIN instead of killing the turn", async () => {
+    vi.mocked(generateStructured).mockRejectedValueOnce(new Error("llm down"));
+    const res = await runTako(req);
+    expect(runTakoFollowup.mock.calls[0][1]).toBe("EXPLAIN");
+    expect(res.trace?.action).toBe("EXPLAIN");
+  });
+
+  it("GENERATE flows to the follow-up as AUGMENT until the research lane lands", async () => {
+    vi.mocked(generateStructured).mockResolvedValueOnce({ action: "GENERATE", reason: "make a chart" } as any);
+    await runTako(req);
+    expect(runTakoFollowup.mock.calls[0][1]).toBe("AUGMENT");
   });
 });

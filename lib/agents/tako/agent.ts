@@ -1,5 +1,5 @@
 import type { AgentRequest, AgentResponse } from "../../schema";
-import type { EmitFn } from "../shared/types";
+import type { EmitFn, RouteAction } from "../shared/types";
 import { generateStructured } from "../../llm";
 import { sanitizeOps } from "../../sanitize";
 import { finalizeOps } from "../../relate";
@@ -12,30 +12,42 @@ import { graphStrategy, type QueryStrategy } from "./strategy";
 
 const OPENAI = "openai" as const;
 
+// Route the turn. An empty board deterministically runs the initial pipeline —
+// no router LLM call. A router hard-failure defaults to EXPLAIN (answer the
+// turn from board context; never kill it).
+async function routeTurn(req: AgentRequest, historyText: string, emit?: EmitFn): Promise<RouteAction> {
+  if (req.canvasState.nodes.length === 0) return "REPLACE";
+  emit?.({ type: "trace", stage: "routing" });
+  try {
+    const route = await generateStructured({
+      provider: OPENAI,
+      system: `${ROUTER}\nReturn { action, reason }.`,
+      prompt: ctxBlock(req, historyText),
+      schema: zRoute,
+      label: "route",
+    });
+    return route.action;
+  } catch {
+    return "EXPLAIN";
+  }
+}
+
 export async function runTako(
   req: AgentRequest, emit?: EmitFn, strategy: QueryStrategy = graphStrategy,
 ): Promise<AgentResponse> {
-  // Fold conversation history first — feeds routing AND the follow-up answer.
+  // Fold conversation history first — feeds routing AND the lanes.
   const folded = await foldHistory({ turns: req.history ?? [], priorSummary: req.historySummary }, summarizeTurns);
   const historyText = folded.historyText;
 
-  // Route first (fast, cheap).
-  emit?.({ type: "trace", stage: "routing" });
-  const hasBoard = req.canvasState.nodes.length > 0;
-  const route = await generateStructured({
-    provider: OPENAI,
-    system: `${ROUTER}\nReturn { action, reason }.`,
-    prompt: ctxBlock(req, historyText),
-    schema: zRoute,
-    label: "route",
-  });
-  // NEW_BOARD when empty board regardless of model guess.
-  const action = hasBoard ? route.action : "NEW_BOARD";
+  const action = await routeTurn(req, historyText, emit);
 
-  const isFollowup = action === "EXPLAIN" || action === "AUGMENT" || action === "REPLACE";
-  const result = isFollowup
-    ? await runTakoFollowup(req, action, historyText, emit)
-    : await runTakoInitial(req, emit, strategy);
+  // Staged wiring: EXPLAIN/AUGMENT/GENERATE still answer via the legacy
+  // follow-up (GENERATE behaves as AUGMENT); the answer/research lanes replace
+  // this in the lane tasks. REPLACE (and the empty board) rebuilds via the
+  // initial research-tree pipeline.
+  const result = action === "REPLACE"
+    ? await runTakoInitial(req, emit, strategy)
+    : await runTakoFollowup(req, action === "GENERATE" ? "AUGMENT" : action, historyText, emit);
 
   // Node ops were already streamed; sanitize + provenance-filter them, then let
   // relate.ts append the structural edges. The result carries the authoritative

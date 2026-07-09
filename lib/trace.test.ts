@@ -8,7 +8,7 @@ const call = (nodeId: string, seq: number, cardId: string): TakoCallRecord => ({
 });
 
 const trace: TurnTrace = {
-  action: "NEW_BOARD", provider: "tako", queries: ["q nvda", "q amd"], cards: [], opsApplied: 0,
+  action: "REPLACE", provider: "tako", queries: ["q nvda", "q amd"], cards: [], opsApplied: 0,
   notes: ["some note", "another"], ms: 1840,
   graph: { resolved: [{ query: "Nvidia", node: "NVIDIA" }], related: [{ node: "NVIDIA", items: ["a", "b", "c"] }] },
   tree: [
@@ -148,15 +148,38 @@ describe("gap-fill trace plumbing", () => {
 // Live graph visibility: graph search/related calls must attach to their node in the
 // LIVE view too, not only in the authoritative post-run tree.
 describe("live graph calls", () => {
-  it("stepsToDisplay attaches live graph calls to their node", () => {
+  it("stepsToDisplay attaches live graph calls to their node — subject retained", () => {
     const views = stepsToDisplay([
       { t: "reasoning", nodeId: "rq_x", depth: 1, question: "nvidia revenue", kind: "leaf" },
-      { t: "graph", nodeId: "rq_x", call: { endpoint: "graph/search", params: { q: "NVIDIA Corporation", types: "entity" }, ms: 40, results: [{ name: "NVIDIA Corporation" }] } },
-      { t: "graph", nodeId: "rq_x", call: { endpoint: "graph/related", params: { node_id: "nv-1", relation_type: "metric", q: "revenue" }, ms: 55, results: [{ name: "Total Revenue" }] } },
+      { t: "graph", nodeId: "rq_x", call: { endpoint: "graph/search", params: { q: "NVIDIA Corporation", types: "entity", subtype: "Companies" }, ms: 40, results: [{ name: "NVIDIA Corporation" }] } },
+      { t: "graph", nodeId: "rq_x", call: { endpoint: "graph/related", params: { node_id: "nv-1", relation_type: "metric", q: "revenue" }, subject: "NVIDIA Corporation", ms: 55, results: [{ name: "Total Revenue" }] } },
     ]);
     expect(views).toHaveLength(1);
     expect(views[0].graphCalls).toHaveLength(2);
     expect(views[0].graphCalls[0].endpoint).toBe("graph/search");
+    expect(views[0].graphCalls[0].params.subtype).toBe("Companies");
     expect(views[0].graphCalls[1].results[0].name).toBe("Total Revenue");
+    expect(views[0].graphCalls[1].subject).toBe("NVIDIA Corporation"); // related calls stay attributable to their entity
+  });
+});
+
+// Entity-first lookup visibility: the planner's subtype choice must survive into
+// both the authoritative tree view and the live reasoning view.
+describe("subtype trace plumbing", () => {
+  it("buildTree carries the node's subtype onto the view", () => {
+    const flat = [
+      { nodeId: "synth", depth: 0, question: "q", kind: "branch" as const, findingCount: 0, children: ["rq_n"] },
+      { nodeId: "rq_n", depth: 1, question: "nvidia revenue", kind: "leaf" as const, findingCount: 1, children: [], entities: ["NVIDIA Corporation", "Nvidia"], subtype: "Companies", metrics: ["revenue"] },
+    ];
+    const leaf = buildTree(flat)[0].children[0];
+    expect(leaf.entities).toEqual(["NVIDIA Corporation", "Nvidia"]);
+    expect(leaf.subtype).toBe("Companies");
+    expect(leaf.metrics).toEqual(["revenue"]);
+  });
+  it("stepsToDisplay carries a reasoning step's subtype onto the live view", () => {
+    const views = stepsToDisplay([
+      { t: "reasoning", nodeId: "rq_n", depth: 1, question: "nvidia revenue", kind: "leaf", entities: ["NVIDIA Corporation"], subtype: "Companies", metrics: ["revenue"] },
+    ]);
+    expect(views[0].subtype).toBe("Companies");
   });
 });
