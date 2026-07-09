@@ -89,6 +89,9 @@ export interface TurnTrace {
     nodes: { id: string; title: string }[];
     takoAnswerUsed: boolean;
     cards: { id: string; title: string; url: string }[];
+    // One entry per real /v1/contents fetch this turn — the underlying data the
+    // answer actually read. Optional for back-compat with persisted sessions.
+    contents?: { nodeId: string; cardId?: string; title: string; rows: number }[];
   };
 }
 

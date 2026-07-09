@@ -110,21 +110,23 @@ describe("groundingOf / countCalls", () => {
 
 describe("groundedInOf", () => {
   it("returns empty structure when the trace has no groundedIn", () => {
-    expect(groundedInOf(undefined)).toEqual({ nodes: [], takoAnswerUsed: false, cards: [] });
-    expect(groundedInOf({} as any)).toEqual({ nodes: [], takoAnswerUsed: false, cards: [] });
+    expect(groundedInOf(undefined)).toEqual({ nodes: [], takoAnswerUsed: false, cards: [], contents: [] });
+    expect(groundedInOf({} as any)).toEqual({ nodes: [], takoAnswerUsed: false, cards: [], contents: [] });
   });
 
-  it("passes through nodes/cards and the tako flag", () => {
+  it("passes through nodes/cards/contents and the tako flag", () => {
     const g = groundedInOf({
       groundedIn: {
         nodes: [{ id: "nvda", title: "Nvidia revenue" }],
         takoAnswerUsed: true,
         cards: [{ id: "c1", title: "Card", url: "https://x" }],
+        contents: [{ nodeId: "nvda", cardId: "c1", title: "Nvidia revenue", rows: 12 }],
       },
     } as any);
     expect(g.nodes[0].id).toBe("nvda");
     expect(g.takoAnswerUsed).toBe(true);
     expect(g.cards[0].id).toBe("c1");
+    expect(g.contents[0]).toEqual({ nodeId: "nvda", cardId: "c1", title: "Nvidia revenue", rows: 12 });
   });
 });
 
