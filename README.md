@@ -76,11 +76,15 @@ four Mermaid diagrams (Tako initial/follow-up, baseline initial/follow-up).
 
 ### The router
 
-Each message is classified into NEW_BOARD / REPLACE / AUGMENT / REFRAME / EXPLAIN, then
-grounded via the active provider, connected (edges for genuinely related nodes), and
-emitted as a diff. Selection biases toward EXPLAIN or a scoped AUGMENT; `side_chat`
-messages answer in `sideReply`. See `lib/agents/shared/router.ts` and
-`docs/agents-architecture.md` for the full decision trees per provider and turn type.
+Each message is classified into one of four actions: **REPLACE** (a fresh investigation —
+the pipeline rebuilds the board from scratch, replacing every existing node; an empty
+board goes straight to the pipeline, skipping the router call), **AUGMENT** (the research
+lane adds one subquery answer node beside the selection), **GENERATE** (an explicit
+component request — same research lane as AUGMENT), and **EXPLAIN** (the agentic gather
+loop answers from board context; the board is left unchanged). Selection biases toward
+EXPLAIN or a scoped AUGMENT; `side_chat` messages answer in `sideReply`. See
+`lib/agents/shared/router.ts` and `docs/agents-architecture.md` for the full decision
+trees per provider and turn type.
 
 ## Guardrails baked in
 

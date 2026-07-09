@@ -88,8 +88,9 @@ async function gatherEvidence(
           recordCall({
             callId: `${CHAT_NODE}:contents:${calls.length}`, nodeId: CHAT_NODE,
             query: n.title, endpoint: "/v1/contents", effort: "fast", ms: Date.now() - t0,
-            cards: [{ id: n.tako?.cardId ?? nodeId, title: n.title, url }],
-            ...(data ? {} : { error: "no data available" }),
+            ...(data
+              ? { cards: [{ id: n.tako?.cardId ?? nodeId, title: n.title, url }] }
+              : { cards: [], error: "no data available" }),
           });
           if (!data) return "no data available";
           contents.push({

@@ -3,11 +3,8 @@ import type { AgentRequest, CanvasNode } from "../../schema";
 
 const h = vi.hoisted(() => ({
   mockResearchLeaf: vi.fn(),
-  mockNewResearchCtx: vi.fn(),
   mockRunAnswerLane: vi.fn(),
   mockGenerateStructured: vi.fn(),
-  mockUniqueResearchId: vi.fn(),
-  mockDerivedEdge: vi.fn(),
 }));
 
 vi.mock("../../llm", () => ({
@@ -15,15 +12,14 @@ vi.mock("../../llm", () => ({
   streamAnswer: vi.fn(),
 }));
 
-vi.mock("./flow", () => ({
-  researchLeaf: h.mockResearchLeaf,
-  newResearchCtx: h.mockNewResearchCtx,
-  uniqueResearchId: h.mockUniqueResearchId,
-  derivedEdge: h.mockDerivedEdge,
-  FindingLedger: class MockFindingLedger {
-    list() { return []; }
-  },
-}));
+// Only researchLeaf is mocked — newResearchCtx/uniqueResearchId/derivedEdge (and
+// FindingLedger, via ./findings) run for REAL, so this test exercises the actual
+// id/edge shapes runComponentLane depends on instead of a stand-in that can drift
+// from the real signatures.
+vi.mock("./flow", async (orig) => {
+  const real: any = await orig();
+  return { ...real, researchLeaf: (...a: any[]) => h.mockResearchLeaf(...a) };
+});
 
 vi.mock("./chat", () => ({
   runAnswerLane: h.mockRunAnswerLane,
@@ -31,12 +27,6 @@ vi.mock("./chat", () => ({
 
 vi.mock("./strategy", () => ({
   graphStrategy: {},
-}));
-
-vi.mock("./findings", () => ({
-  FindingLedger: class MockFindingLedger {
-    list() { return []; }
-  },
 }));
 
 import { runComponentLane } from "./component";
@@ -67,36 +57,6 @@ beforeEach(() => {
   h.mockResearchLeaf.mockResolvedValue({
     nodeId: "rq_amd_datacenter_revenue", title: "AMD data-center revenue", synthesis: "AMD grew.", findingCount: 2,
     children: [], depth: 1, kind: "leaf" as const,
-  });
-
-  // Setup uniqueResearchId mock
-  h.mockUniqueResearchId.mockReturnValue("rq_amd_datacenter_revenue");
-
-  // Setup derivedEdge mock - make it dynamic based on arguments
-  h.mockDerivedEdge.mockImplementation((from: string, to: string) => ({
-    op: "add_edge", edge: { id: `derives:${from}->${to}`, from, to, kind: "derived_from" }
-  }));
-
-  // Setup newResearchCtx mock
-  h.mockNewResearchCtx.mockReturnValue({
-    req: req(),
-    ledger: { list: () => [] },
-    push: vi.fn(),
-    emit: vi.fn(),
-    strategy: {},
-    notes: [],
-    usedIds: new Set(),
-    tree: [],
-    resolved: [],
-    related: [],
-    queries: [],
-    webSources: [],
-    seenSourceUrls: new Set(),
-    sourcesByNode: new Map(),
-    contents: { fetched: 0, cap: 12, cache: new Map() },
-    calls: [],
-    timings: {},
-    reasoning: [],
   });
 
   // Setup runAnswerLane mock

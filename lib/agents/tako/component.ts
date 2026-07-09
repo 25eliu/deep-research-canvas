@@ -105,6 +105,8 @@ export async function runComponentLane(
   if (toBoard) emit?.({ type: "token", text });
   log("tako", "component lane", { action, question: plan.question, findings: result.findingCount, anchor: anchor ?? null });
 
+  const cardRefs = ledger.list().map((f) => ({ id: f.card.cardId, title: f.title, url: f.url || "" }));
+
   return {
     nodeOps,
     narration: toBoard ? text : "",
@@ -114,7 +116,7 @@ export async function runComponentLane(
     trace: {
       queries: ctx.queries,
       answerUsed: false,
-      cards: ledger.list().map((f) => ({ id: f.card.cardId, title: f.title, url: f.url || "" })),
+      cards: cardRefs,
       calls: ctx.calls,
       notes: ctx.notes,
       tree: ctx.tree,
@@ -123,7 +125,7 @@ export async function runComponentLane(
       groundedIn: {
         nodes: [],
         takoAnswerUsed: false,
-        cards: ledger.list().map((f) => ({ id: f.card.cardId, title: f.title, url: f.url || "" })),
+        cards: cardRefs,
       },
       timings: { ...ctx.timings, total: 0 } as Timings,
     },

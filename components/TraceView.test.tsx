@@ -30,4 +30,21 @@ describe("TraceView grounded chips", () => {
     fireEvent.click(screen.getByText("Nvidia revenue"));
     expect(onSelect).toHaveBeenCalledWith("nvda");
   });
+
+  it("renders the Grounded-in block when only contents is populated", () => {
+    // Isolates the `hasGrounded` `|| contents` branch: nodes/cards empty,
+    // takoAnswerUsed false — contents alone must still surface the block.
+    const contentsOnlyTrace: any = {
+      action: "EXPLAIN", provider: "tako", queries: [], cards: [], opsApplied: 0, notes: [], ms: 800,
+      groundedIn: {
+        nodes: [],
+        takoAnswerUsed: false,
+        cards: [],
+        contents: [{ nodeId: "nvda", cardId: "c1", title: "Nvidia revenue", rows: 12 }],
+      },
+    };
+    render(<TraceView trace={contentsOnlyTrace} streaming={false} />);
+    fireEvent.click(screen.getByText("Trace"));
+    expect(screen.getByText("Nvidia revenue · data")).toBeTruthy();
+  });
 });
