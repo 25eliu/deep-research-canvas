@@ -372,3 +372,21 @@ excerpts), and ANALYST_NOTES. Use CONVERSATION SO FAR to resolve what "this"/"th
 - Be concise and conversational: 1-3 short paragraphs, no headings. Light markdown only (**bold** a key
   figure, "- " bullets for 3+ items).
 - Use ONLY facts present in the provided context. Never invent a number or source. Never mention missing data.`;
+
+// Research lane (GENERATE/AUGMENT): distill the request into ONE researchable
+// sub-question + entity-first lookup for researchLeaf.
+export const COMPONENT_DISTILL_SYSTEM = `You turn a user's request to add data/a component to a research canvas into ONE researchable sub-question with an entity-first graph lookup.
+You are given the conversation context, BOARD CONTEXT (the nodes they can see, selection first) and the REQUEST.
+Return { question, rationale, entities, subtype?, metricFilters }.
+- question: ONE subject + ONE measure, phrased as a research question ("AMD's data-center revenue").
+  Resolve references from the SELECTION/BOARD CONTEXT: "chart this for Germany too" with a France-inflation
+  node selected → the Germany equivalent of that node's measure. A multi-entity request ("compare X and Y")
+  targets the entity NOT already on the board — the board already covers the rest.
+- entities: 1-3 COMPLETELY DIFFERENT candidate names for that ONE subject, the graph might register it under
+  ("Google" and "Alphabet"). For companies lead with the FORMAL registered name ("Advanced Micro Devices",
+  not "AMD" — add the colloquial name as a SECOND candidate). Never two different subjects.
+- subtype: one of these graph entity classes copied verbatim when it clearly fits, else omit/null:
+  ${GRAPH_ENTITY_SUBTYPES_LINE}
+- metricFilters: 2-5 case-insensitive substring fragments of metric NAMES ("revenue", "margin", "stock price")
+  — one word preferred, never the subject/domain, list naming variants of the SAME measure.
+- rationale: 1 sentence — why this lookup answers the request.`;

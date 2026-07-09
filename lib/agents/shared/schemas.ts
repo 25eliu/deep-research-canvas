@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { zCanvasOps } from "../../schema";
+import { GRAPH_ENTITY_SUBTYPES } from "./graph-subtypes";
 
 // The composed answer report lives in schema.ts (it's a canvas-node field); re-export
 // here so agent code has one import site for all agent schemas.
@@ -49,21 +50,41 @@ export const zBranchResult = z.object({
 export type BranchResult = z.infer<typeof zBranchResult>;
 
 
+// Entity-first graph lookup carried by every research question: 1-3 COMPLETELY
+// DIFFERENT candidate names the graph might register the SAME subject under
+// ("Google", "Alphabet"), an optional entity-class filter for graph/search's
+// `subtype` param (z.enum = the schema guarantee; .nullable().optional() because
+// OpenAI strict structured outputs is off — see CLAUDE.md — and Zod + auto-retry
+// enforce it instead), and 1-5 short substring filters for the related-metrics
+// fetch's case-insensitive `q` param ("revenue", "sales", "margin") — a LIST of
+// name-fragment variants, so one filter missing how a series is actually named
+// doesn't blank the whole lookup.
+const zLookup = {
+  entities: z.array(z.string().min(1)).min(1).max(3),
+  subtype: z.enum(GRAPH_ENTITY_SUBTYPES).nullable().optional(),
+  metricFilters: z.array(z.string().min(1)).min(1).max(5),
+};
+
+// The plain-object shape of zLookup that flows through the pipeline (subtype
+// normalized to undefined; strategy/flow/gaps all consume this).
+export interface GraphLookup {
+  entities: string[];
+  subtype?: string;
+  metricFilters: string[];
+}
+
 // Recursive decompose step: the LLM decides whether a research question is atomic
 // (fetch data directly) or should split into distinct sub-questions (branch).
-// Every question — the plan itself and each sub-question — is a validated LOOKUP PAIR:
-// exactly ONE entity term (searched only in the graph's entity namespace) + ONE metric
-// term (searched only in the metric namespace). Singular fields are deliberate: they
-// force the one-target-per-question model on the LLM, and a missing/empty half fails
-// validation so generateObject retries instead of proceeding half-grounded.
+// Every question — the plan itself and each sub-question — carries a validated
+// entity-first lookup (zLookup above). A missing/empty half fails validation so
+// generateObject retries instead of proceeding half-grounded.
 export const zResearchPlan = z.object({
   atomic: z.boolean(),
   // 1-2 sentences: WHY this question is atomic or splits into these sub-questions.
   // Surfaced to the user as the "reasoning" step for this research node.
   rationale: z.string(),
-  // The lookup pair for THIS question (leaf fetch / broad-view grounding).
-  entity: z.string().min(1),
-  metric: z.string().min(1),
+  // The lookup for THIS question (leaf fetch / broad-view grounding).
+  ...zLookup,
   // Set when the question's subject is a CLASS of entities ("emerging infrastructure
   // startups") rather than a nameable one — the caller resolves real members via a
   // grounded tako answer, then re-decomposes per member (root-level only).
@@ -71,10 +92,18 @@ export const zResearchPlan = z.object({
   subQuestions: z.array(z.object({
     question: z.string(),
     rationale: z.string().optional(), // why this facet matters (optional per-sub reasoning)
-    entity: z.string().min(1),
-    metric: z.string().min(1),
+    ...zLookup,
   })).optional(),
 });
+
+// The research lane's distilled plan: ONE researchable sub-question + the same
+// entity-first lookup researchLeaf consumes (see zLookup docs above).
+export const zComponentPlan = z.object({
+  question: z.string().min(1),
+  rationale: z.string(),
+  ...zLookup,
+});
+export type ComponentPlan = z.infer<typeof zComponentPlan>;
 
 // Stage 5 "structure": the LLM only names/summarizes sections + a board headline.
 // It cannot mint nodes — section summaries become update_node patches, the
@@ -85,14 +114,13 @@ export const zStructure = z.object({
 });
 
 // Gap-analysis output: what the evidence review says is still missing before the
-// final report can answer decisively. Each gap is a ready-to-run lookup PAIR.
+// final report can answer decisively. Each gap is a ready-to-run entity-first lookup.
 export const zGapPlan = z.object({
   sufficient: z.boolean(),
   rationale: z.string(),
   gaps: z.array(z.object({
     question: z.string().min(1),
-    entity: z.string().min(1),
-    metric: z.string().min(1),
+    ...zLookup,
     why: z.string(),
   })),
 });
