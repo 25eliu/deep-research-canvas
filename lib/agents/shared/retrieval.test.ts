@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { retrieveNodes, nodeContentBlock } from "./retrieval";
+import { retrieveNodes, nodeContentBlock, nodeCatalog } from "./retrieval";
 import type { CanvasNode, CanvasState } from "../../schema";
 
 const node = (over: Partial<CanvasNode>): CanvasNode => ({
@@ -74,5 +74,74 @@ describe("nodeContentBlock", () => {
 
   it("returns a sentinel when empty", () => {
     expect(nodeContentBlock([])).toBe("(no matching board nodes)");
+  });
+});
+
+describe("nodeContentBlock full serialization", () => {
+  it("serializes report blocks (verdict, tiles, leaderboard, comparison)", () => {
+    const base = { grounding: "tako" as const, confidence: 0.9 };
+    const node: CanvasNode = {
+      id: "synth", type: "text", title: "Verdict", ...base,
+      report: {
+        verdict: "Nvidia leads.",
+        blocks: [
+          { kind: "tiles", tiles: [{ label: "Rev", value: "$130B", delta: "+126%" }] },
+          { kind: "leaderboard", metricLabel: "Revenue", rows: [{ rank: 1, entity: "Nvidia", value: "$130B" }] },
+          { kind: "comparison", series: [{ label: "NVDA", entity: "Nvidia", points: [{ x: "2024", y: 130 }] }] },
+        ],
+      },
+    };
+    const out = nodeContentBlock([node]);
+    expect(out).toContain("report: Nvidia leads.");
+    expect(out).toContain("tiles: Rev=$130B (+126%)");
+    expect(out).toContain("leaderboard (Revenue): 1. Nvidia $130B");
+    expect(out).toContain("comparison Nvidia: 2024:130");
+  });
+
+  it("serializes criteria weights and searches", () => {
+    const base = { grounding: "tako" as const, confidence: 0.9 };
+    const node: CanvasNode = {
+      id: "crit", type: "criteria", title: "Criteria", ...base,
+      criteria: { weights: { growth: 0.6, value: 0.4 } },
+      searches: ["nvidia revenue", "amd revenue"],
+    };
+    const out = nodeContentBlock([node]);
+    expect(out).toContain("criteria: growth=0.6, value=0.4");
+    expect(out).toContain("searches: nvidia revenue; amd revenue");
+  });
+});
+
+describe("nodeCatalog", () => {
+  const base = { grounding: "tako" as const, confidence: 0.9 };
+  const state: CanvasState = {
+    nodes: [
+      { id: "sec", type: "entity_section", title: "Nvidia", ...base },
+      { id: "card", type: "data_card", title: "Nvidia revenue", section: "sec", ...base, tako: { cardId: "c1", webpageUrl: "https://t/c1" } },
+      { id: "note", type: "text", title: "A note", ...base },
+      { id: "src", type: "text", role: "source", title: "Reuters", ...base, sources: [{ url: "https://r/x" }] },
+    ],
+    edges: [],
+  };
+  it("lists content nodes with hasData for tako cards and web sources", () => {
+    const cat = nodeCatalog(state);
+    expect(cat.map((c) => c.id)).toEqual(["card", "note", "src"]); // entity_section excluded
+    expect(cat[0]).toEqual({ id: "card", type: "data_card", title: "Nvidia revenue", section: "sec", hasData: true });
+    expect(cat[1].hasData).toBe(false);
+    expect(cat[2].hasData).toBe(true);
+  });
+});
+
+describe("retrieveNodes (regression)", () => {
+  it("selection-first still returns selected nodes in order", () => {
+    const base = { grounding: "tako" as const, confidence: 0.9 };
+    const state: CanvasState = {
+      nodes: [
+        { id: "a", type: "text", title: "A", ...base },
+        { id: "b", type: "text", title: "B", ...base },
+      ],
+      edges: [],
+    };
+    const out = retrieveNodes(state, { nodeIds: ["b", "a"] }, "anything");
+    expect(out.map((n) => n.id)).toEqual(["b", "a"]);
   });
 });
