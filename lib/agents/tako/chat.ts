@@ -22,6 +22,7 @@ const OPENAI = "openai" as const;
 const GATHER_MAX_STEPS = 6; // bounded evidence loop (spec)
 const CONTENTS_BUDGET = 8; // real /v1/contents fetches per turn (cache hits are free)
 const CHAT_NODE = "chat"; // nodeId all chat-lane calls/synthesis events key on
+const WEB_TEXT_CAP = 1500; // leading chars of web-source page text (same cap as flow.ts's WEB_CONTENT_CAP)
 
 interface GatheredAnswer { query: string; answer: string; cardTitles: string[] }
 interface GatheredContents { nodeId: string; cardId?: string; title: string; data: string; rows: number }
@@ -36,6 +37,12 @@ function errorMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
+// CSV series → header + latest rows (excerptCsv); prose page text → the LEADING
+// slice (the article lead carries the substance — tail truncation would drop it).
+function excerptContents(data: string, isCsv: boolean): string {
+  return isCsv ? excerptCsv(data) : data.slice(0, WEB_TEXT_CAP);
+}
+
 // Phase A: the model reads the node catalog + board context and pulls exactly the
 // evidence it needs. Tool failures come back as tool-RESULT strings so the loop
 // always survives them; only a loop-level throw escapes (the caller falls back).
@@ -44,7 +51,7 @@ async function gatherEvidence(
 ): Promise<GatherOut> {
   const catalog = nodeCatalog(req.canvasState);
   const byId = new Map(req.canvasState.nodes.map((n) => [n.id, n]));
-  const cache = new Map<string, string>();
+  const cache = new Map<string, { data: string; isCsv: boolean }>();
   let fetched = 0;
   const answers: GatheredAnswer[] = [];
   const contents: GatheredContents[] = [];
@@ -69,14 +76,15 @@ async function gatherEvidence(
         const url = n.tako?.webpageUrl || n.sources?.[0]?.url;
         if (!url) return "this node has no underlying data source";
         const hit = cache.get(url);
-        if (hit !== undefined) return hit ? excerptCsv(hit) : "no data available";
+        if (hit !== undefined) return hit.data ? excerptContents(hit.data, hit.isCsv) : "no data available";
         if (fetched >= CONTENTS_BUDGET) return "contents budget exhausted — answer from the evidence you already have";
         fetched++;
         const t0 = Date.now();
         try {
           const c = await takoContents(url, { mode: "inline" });
+          const isCsv = !!c.csv;
           const data = c.csv || c.text || "";
-          cache.set(url, data);
+          cache.set(url, { data, isCsv });
           recordCall({
             callId: `${CHAT_NODE}:contents:${calls.length}`, nodeId: CHAT_NODE,
             query: n.title, endpoint: "/v1/contents", effort: "fast", ms: Date.now() - t0,
@@ -86,12 +94,13 @@ async function gatherEvidence(
           if (!data) return "no data available";
           contents.push({
             nodeId, cardId: n.tako?.cardId, title: n.title,
-            data: excerptCsv(data),
-            rows: Math.max(0, data.split("\n").filter(Boolean).length - 1),
+            data: excerptContents(data, isCsv),
+            // Row counts only mean something for a CSV series, not prose.
+            rows: isCsv ? Math.max(0, data.split("\n").filter(Boolean).length - 1) : 0,
           });
-          return excerptCsv(data);
+          return excerptContents(data, isCsv);
         } catch (e: unknown) {
-          cache.set(url, "");
+          cache.set(url, { data: "", isCsv: false });
           recordCall({
             callId: `${CHAT_NODE}:contents:${calls.length}`, nodeId: CHAT_NODE,
             query: n.title, endpoint: "/v1/contents", effort: "fast", ms: Date.now() - t0,
@@ -162,8 +171,7 @@ export async function runAnswerLane(
     const note = `gather loop failed — falling back (${errorMessage(e)})`;
     log("tako", "chat gather fallback", { error: errorMessage(e) });
     const fallback = await runTakoFollowup(req, "EXPLAIN", historyText, emit);
-    fallback.trace.notes = [note, ...(fallback.trace.notes ?? [])];
-    return fallback;
+    return { ...fallback, trace: { ...fallback.trace, notes: [note, ...(fallback.trace.notes ?? [])] } };
   }
   timings.search = Date.now() - t;
 

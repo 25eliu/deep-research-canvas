@@ -120,6 +120,27 @@ describe("runAnswerLane — gather loop", () => {
     expect(result.sideReply).toBe("answer"); // turn still answered
   });
 
+  it("excerpts web-source page text from the LEAD (not CSV tail truncation) and records rows 0", async () => {
+    const webNode: CanvasNode = {
+      id: "web1", type: "text", title: "Reuters article", grounding: "web", confidence: 0.8,
+      sources: [{ url: "https://r/article" }],
+    };
+    const longText = ["lead paragraph", "middle", ...Array.from({ length: 40 }, (_, i) => `line ${i}`), "tail"].join("\n");
+    vi.mocked(takoContents).mockResolvedValueOnce({ text: longText } as any);
+    let toolResult = "";
+    script = async (tools) => {
+      toolResult = await tools.get_node_contents.execute({ nodeId: "web1" });
+    };
+    const result = await runAnswerLane(
+      req({ canvasState: { nodes: [webNode], edges: [] }, selection: undefined }), "", () => {},
+    );
+    expect(toolResult.startsWith("lead paragraph")).toBe(true);
+    expect(toolResult).toContain("middle"); // tail-truncation would have dropped the lead's second line
+    expect(result.trace.groundedIn?.contents).toEqual([
+      { nodeId: "web1", cardId: undefined, title: "Reuters article", rows: 0 },
+    ]);
+  });
+
   it("falls back to the legacy follow-up when the gather loop hard-fails", async () => {
     vi.mocked(generateWithTools).mockRejectedValueOnce(new Error("tool loop exploded"));
     const result = await runAnswerLane(req(), "HIST", () => {});
