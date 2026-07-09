@@ -50,8 +50,7 @@ async function distillPlan(req: AgentRequest, historyText: string, notes: string
 // research lane's notes so the trace explains the degradation.
 async function degrade(req: AgentRequest, historyText: string, notes: string[], emit?: EmitFn): Promise<PipelineResult> {
   const fallback = await runAnswerLane(req, historyText, emit);
-  fallback.trace.notes = [...notes, ...(fallback.trace.notes ?? [])];
-  return fallback;
+  return { ...fallback, trace: { ...fallback.trace, notes: [...notes, ...(fallback.trace.notes ?? [])] } };
 }
 
 export async function runComponentLane(
