@@ -8,7 +8,8 @@ import { ROUTER, zRoute } from "../shared/router";
 import { foldHistory, summarizeTurns } from "../shared/memory";
 import { logError } from "../../log";
 import { runTakoInitial } from "./pipeline";
-import { runTakoFollowup } from "./followup";
+import { runAnswerLane } from "./chat";
+import { runComponentLane } from "./component";
 import { graphStrategy, type QueryStrategy } from "./strategy";
 
 const OPENAI = "openai" as const;
@@ -43,13 +44,10 @@ export async function runTako(
 
   const action = await routeTurn(req, historyText, emit);
 
-  // Staged wiring: EXPLAIN/AUGMENT/GENERATE still answer via the legacy
-  // follow-up (GENERATE behaves as AUGMENT); the answer/research lanes replace
-  // this in the lane tasks. REPLACE (and the empty board) rebuilds via the
-  // initial research-tree pipeline.
-  const result = action === "REPLACE"
-    ? await runTakoInitial(req, emit, strategy)
-    : await runTakoFollowup(req, action === "GENERATE" ? "AUGMENT" : action, historyText, emit);
+  const result =
+    action === "REPLACE" ? await runTakoInitial(req, emit, strategy)
+    : action === "EXPLAIN" ? await runAnswerLane(req, historyText, emit)
+    : await runComponentLane(req, action, historyText, emit, strategy);
 
   // Node ops were already streamed; sanitize + provenance-filter them, then let
   // relate.ts append the structural edges. The result carries the authoritative
