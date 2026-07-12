@@ -35,7 +35,7 @@ export interface TakoCallRecord {
 // drill-down: the exact request params as sent and the (compacted) response items.
 export interface GraphCallRecord {
   endpoint: "graph/search" | "graph/related";
-  params: { q?: string; types?: string; subtype?: string; node_id?: string; relation_type?: string; limit?: number };
+  params: { q?: string; types?: string; subtype?: string; node_id?: string; relation_type?: string; relation?: string; limit?: number };
   // Display-only: the resolved node's NAME a related call was issued for (params carry
   // only the opaque node_id) — lets the trace label "Alphabet Inc. · q=revenue" instead
   // of a slug. Never part of the request; excluded from the copy/paste querystring.

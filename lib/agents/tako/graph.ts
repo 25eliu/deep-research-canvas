@@ -25,7 +25,7 @@ async function get(path: string): Promise<any> {
       throw new Error(`Tako graph ${res.status} on ${path}: ${text}`);
     }
     const json = await res.json();
-    const count = json?.results?.length ?? json?.relation?.items?.length ?? 0;
+    const count = json?.results?.length ?? json?.relation?.items?.length ?? json?.relations?.length ?? 0;
     timer.done(`GET ${path} ${res.status}`, { count });
     return json;
   } catch (e: unknown) {
@@ -48,17 +48,46 @@ export async function graphSearch(
   return Array.isArray(data?.results) ? data.results : [];
 }
 
+// One relation group from the /related OVERVIEW form (no relation param): a stable
+// key (fixed like "metrics"/"siblings" or a named edge like "rel:competes_with"),
+// a kind (related|membership|data|sibling|source), a server label, exact total
+// (capped at 1000 → totalCapped), and ~10 inline items (full nodes).
+export interface GraphRelation {
+  key: string; kind: string; label: string;
+  total: number; totalCapped: boolean; items: GraphItem[];
+}
+
+function parseRelation(r: any): GraphRelation {
+  return {
+    key: String(r?.key ?? ""), kind: String(r?.kind ?? ""), label: String(r?.label ?? ""),
+    total: Number(r?.total ?? 0), totalCapped: Boolean(r?.total_capped),
+    items: Array.isArray(r?.items) ? r.items : [],
+  };
+}
+
+// Overview form: every non-empty relation group on a node, in server order.
+export async function graphOverview(nodeId: string): Promise<{ node: GraphNode; relations: GraphRelation[] }> {
+  const p = new URLSearchParams({ node_id: nodeId });
+  const data = await get(`/related?${p.toString()}`);
+  return {
+    node: data?.node ?? { id: nodeId, name: "", type: "entity" },
+    relations: Array.isArray(data?.relations) ? data.relations.map(parseRelation) : [],
+  };
+}
+
 export async function graphRelated(
   nodeId: string,
-  opts: { relationType: "entity" | "metric"; q?: string; limit?: number },
+  // `relation` is the group key: fixed ("metrics", "entities", "siblings") or a
+  // named-edge key from an overview ("rel:has_team"). Replaces the deprecated
+  // relation_type param (#27511).
+  opts: { relation: string; q?: string; limit?: number },
 ): Promise<GraphItem[]> {
   const p = new URLSearchParams({
-    node_id: nodeId, relation_type: opts.relationType, limit: String(opts.limit ?? 6),
+    node_id: nodeId, relation: opts.relation, limit: String(opts.limit ?? 6),
   });
   // `q` relevance-filters the related items against their NAMES. Only append it when
-  // non-empty: a metric fetch with no `q` returns the entity's full (bounded) menu, which
-  // is what we want as a fallback. (Entity relations should still pass `q` — unfiltered
-  // they return tens of thousands — but that's the caller's choice.)
+  // non-empty: a metrics fetch with no `q` returns the group's (bounded) menu, which
+  // is what we want as a fallback.
   const q = opts.q?.trim();
   if (q) p.set("q", q);
   const data = await get(`/related?${p.toString()}`);
