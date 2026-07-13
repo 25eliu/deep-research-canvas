@@ -148,9 +148,10 @@ describe("runTakoExpand", () => {
 
   it("anchors the new tree to the selected node's tree root with a derived_from edge", async () => {
     const res = await runTakoExpand(expandReq({ selection: { nodeIds: ["rq_nvda"], nodes: [] } }), "HIST");
-    const newRoot = res.nodeOps.find((o: any) => o.op === "add_node" && o.node.role === "synthesis")!.node.id;
-    const anchor = res.nodeOps.find(
-      (o: any) => o.op === "add_edge" && o.edge.kind === "derived_from" && o.edge.from === newRoot,
+    const ops = res.nodeOps as any[];
+    const newRoot = ops.find((o) => o.op === "add_node" && o.node.role === "synthesis")!.node.id;
+    const anchor = ops.find(
+      (o) => o.op === "add_edge" && o.edge.kind === "derived_from" && o.edge.from === newRoot,
     );
     expect(anchor?.edge.to).toBe("synth"); // rq_nvda's tree root
   });
@@ -167,8 +168,9 @@ describe("runTakoExpand cross-links", () => {
   it("emits a validated supports edge the LLM proposes to an existing node", async () => {
     h.crossLinks = { links: [{ from: "SELF_ROOT", to: "rq_nvda", kind: "supports", reason: "same sector" }] };
     const res = await runTakoExpand(expandReq(), "HIST");
-    const newRoot = res.nodeOps.find((o: any) => o.op === "add_node" && o.node.role === "synthesis")!.node.id;
-    const link = res.nodeOps.find((o: any) => o.op === "add_edge" && o.edge.kind === "supports" && o.edge.to === "rq_nvda");
+    const ops = res.nodeOps as any[];
+    const newRoot = ops.find((o) => o.op === "add_node" && o.node.role === "synthesis")!.node.id;
+    const link = ops.find((o) => o.op === "add_edge" && o.edge.kind === "supports" && o.edge.to === "rq_nvda");
     expect(link?.edge.from).toBe(newRoot);
   });
 
