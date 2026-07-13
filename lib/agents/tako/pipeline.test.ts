@@ -682,6 +682,25 @@ describe("graph-grounded cohort resolution", () => {
     expect(searched).not.toContain("Chicago Bulls"); // pre-resolved: leaf skipped entity search
   });
 
+  it("member leaves keep pre-resolved node ids even when their own re-plan returns entities", async () => {
+    // Each member sub-question recurses into research() at depth 1 and runs its OWN
+    // decompose. A real child decompose always returns entities (it re-words the
+    // candidate name for the same subject) — adopting the child's own lookup must not
+    // drop the parent-assigned roster node id, or the leaf re-searches the member by name.
+    h.plans[Q] = firstPass;
+    h.plans[`${Q}::groups`] = { atomic: false, rationale: "per member", entities: ["National Basketball Association"], metricFilters: ["attendance"], subQuestions: memberSubs };
+    h.overview = [teamsGroup];
+    for (const n of ["Chicago Bulls", "New York Knicks", "Los Angeles Lakers"]) {
+      h.plans[`${n} attendance`] = { atomic: true, rationale: "leaf", entities: [n, n.split(" ").pop()!], metricFilters: ["attendance"] };
+    }
+    const { graphSearch } = await import("./graph");
+    await runTakoInitial(nbaReq, () => {});
+    const searched = (graphSearch as any).mock.calls.map((c: any[]) => c[0]);
+    expect(searched).not.toContain("Chicago Bulls");
+    expect(searched).not.toContain("New York Knicks");
+    expect(searched).not.toContain("Los Angeles Lakers");
+  });
+
   it("drills the full roster when total exceeds inline members, into a note", async () => {
     h.plans[Q] = firstPass;
     h.plans[`${Q}::groups`] = { atomic: false, rationale: "per member", entities: ["National Basketball Association"], metricFilters: ["attendance"], subQuestions: memberSubs.slice(0, 2) };

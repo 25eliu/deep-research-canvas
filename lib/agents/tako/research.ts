@@ -330,7 +330,13 @@ export async function research(question: string, depth: number, ctx: ResearchCtx
       // than 2 is a leaf regardless of what the flag claims.
       atomic = subs.length < 2;
       rationale = plan.rationale;
-      if (plan.entities?.length) lookup = toLookup(plan);
+      // Adopt the child plan's own lookup — but PRESERVE a parent-assigned pre-resolved
+      // node (cohort-roster member id): the child re-words candidate names for the SAME
+      // one subject, and dropping the id would silently resurrect entity search for
+      // every roster member (real decomposes always return entities; mocks didn't).
+      if (plan.entities?.length) {
+        lookup = { ...toLookup(plan), ...(opts.lookup?.node ? { node: opts.lookup.node } : {}) };
+      }
     } catch (e: unknown) {
       ctx.notes.push(`decompose failed — ${errorMessage(e)}`);
     }
