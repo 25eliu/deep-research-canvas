@@ -76,9 +76,13 @@ Return { atomic: boolean, rationale: string, entities: string[], subtype?: strin
   CLASS or category ("AI companies", "emerging infrastructure startups", "chip makers") is NOT an entity: when
   the question's subject is a class, set \`cohort\` to that class phrase, return atomic:false with NO
   subQuestions, and STOP — the caller resolves the class into real member names from grounded data and calls
-  you again with a COHORT_MEMBERS list. Even then, STILL populate the top-level \`entities\` +
-  \`metricFilters\` (every plan requires them; they seed the broad view): entities = the class phrase itself
-  and/or the question's geography/market ("United States", an index), metricFilters = the question's measure
+  you again with a COHORT_MEMBERS list. When you set \`cohort\`, the top-level \`entities\` MUST name the ANCHOR — the concrete entity the class
+  hangs off ("compare Nvidia to its competitors" → entities ["NVIDIA Corporation", "Nvidia"]) or the class's
+  own registered name when the class itself is a real organization/index ("all NBA teams" →
+  entities ["National Basketball Association", "NBA"]; "the Magnificent Seven" → ["Magnificent Seven"]).
+  The caller resolves that anchor in the graph and reads the cohort's members off its relations.
+  Even then, STILL populate the top-level \`entities\` +
+  \`metricFilters\` (every plan requires them; they seed the broad view): metricFilters = the question's measure
   fragments.
   A cohort is ONLY for classes whose members are NOT named. If the question itself ENUMERATES its subjects
   ("research the sectors healthcare, finance, and software", "compare Nvidia, AMD and Intel"), there is
@@ -114,6 +118,15 @@ Return { atomic: boolean, rationale: string, entities: string[], subtype?: strin
   COVER THE MEMBERS FIRST: one sub-question per member (each with that single most decision-relevant measure)
   before ANY member gets a second measure — a member without a sub-question is wasted grounding, and the gap
   round + final report handle the remaining facets.
+- When the prompt contains a COHORT_GROUPS list, this IS the second pass, grounded in REAL graph data: each
+  group is {label, total, members} read from the anchor entity's graph relations. Pick the ONE group that IS
+  the question's cohort — prefer the group whose label names the class ("Has team" for "all NBA teams";
+  "Competes with" for "Nvidia's competitors"; a membership group for "the Magnificent Seven") — and create one
+  sub-question per member of THAT group, copying each member's name VERBATIM as that sub-question's first
+  \`entities\` entry; do not set \`cohort\` again, and do not mix members from different groups.
+  COVER THE MEMBERS FIRST: one sub-question per member (each with the question's single most
+  decision-relevant measure) before ANY member gets a second measure. \`total\` may exceed the members shown —
+  plan from the members listed; the caller records the full roster separately.
 - rationale: 1-2 plain sentences explaining WHY you chose atomic vs. split, and what the plan is. This is shown to
   the user as your reasoning for this step — be specific and concrete (name the facets or the single subject).
 - Each sub-question MAY carry its own short rationale (why that facet matters to the overall question).
