@@ -347,6 +347,34 @@ group lines there)
 session — well under the ~180/min budget mentioned in the task context. Not
 a stress test; only reports what was actually observed.
 
+## 14. Addendum (2026-07-12, post-review): drilled item `description` lengths
+
+**Context:** the Task-8 skill review flagged that the "item descriptions can
+run ~2k chars" claim had no capture behind it (the battery's `summ()` printed
+only names, and no description in the earlier captures exceeded 58 chars).
+Verified live to source the claim properly.
+
+**Finding:** full company nodes returned by a named-edge drill carry long
+`description` fields — the longest in a 5-item NVIDIA `rel:competes_with`
+drill is **1,866 chars (Microsoft Corporation)**; every item in the page runs
+1,083–1,866 chars. Per-item lengths:
+
+```
+$ curl -s "https://tako.com/api/beta/graph/related?node_id=ent::nvidia_corporation::5ea55992&relation=rel:competes_with&limit=5"
+1866 Microsoft Corporation
+1562 Tesla, Inc.
+1083 Alphabet Inc.
+1351 International Business Machines Corporation
+1622 Intel Corporation
+MAX: 1866 Microsoft Corporation
+```
+(raw capture: `competes-with-descriptions.json` in the session scratchpad,
+`tako.com`, keyless, 2026-07-12 — lengths computed as
+`max(len(i.get('description') or '') for i in relation['items'])`)
+
+Confirms the truncate-before-prompting guidance: five drilled items ≈ 7.5k
+chars of descriptions alone.
+
 ---
 
 ## Summary of explicitly-asked open questions
