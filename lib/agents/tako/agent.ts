@@ -8,6 +8,7 @@ import { ROUTER, zRoute } from "../shared/router";
 import { foldHistory, summarizeTurns } from "../shared/memory";
 import { logError } from "../../log";
 import { runTakoInitial } from "./pipeline";
+import { runTakoExpand } from "./expand";
 import { runAnswerLane } from "./chat";
 import { runComponentLane } from "./component";
 import { graphStrategy, type QueryStrategy } from "./strategy";
@@ -57,8 +58,9 @@ export async function runTako(
 
   const result =
     action === "REPLACE" ? await runTakoInitial(req, emit, strategy)
+    : action === "RESEARCH" ? await runTakoExpand(req, historyText, emit, strategy)
     : action === "EXPLAIN" ? await runAnswerLane(req, historyText, emit)
-    : await runComponentLane(req, action, historyText, emit, strategy);
+    : await runComponentLane(req, action as "AUGMENT" | "GENERATE", historyText, emit, strategy);
 
   // Node ops were already streamed; sanitize + provenance-filter them, then let
   // relate.ts append the structural edges. The result carries the authoritative

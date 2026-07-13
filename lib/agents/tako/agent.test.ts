@@ -20,6 +20,8 @@ const runComponentLane = vi.fn(async (..._args: unknown[]) => ({ ...emptyResult(
 vi.mock("./component", () => ({ runComponentLane: (...a: any[]) => runComponentLane(...a) }));
 const runTakoInitial = vi.fn(async (..._args: unknown[]) => ({ ...emptyResult(), sideReply: null, trace: {} }));
 vi.mock("./pipeline", () => ({ runTakoInitial: (...a: any[]) => runTakoInitial(...a) }));
+const runTakoExpand = vi.fn(async (..._args: unknown[]) => ({ ...emptyResult(), sideReply: null, trace: {} }));
+vi.mock("./expand", () => ({ runTakoExpand: (...a: any[]) => runTakoExpand(...a) }));
 
 import { runTako } from "./agent";
 import { generateStructured } from "../../llm";
@@ -77,6 +79,21 @@ describe("runTako lane dispatch", () => {
     expect(emitted).toContainEqual({ type: "ops", ops: [{ op: "remove_node", id: "nvda", cascade: true }] });
     // ...and prepended to the finalized op set returned to the caller.
     expect(res.canvasOps[0]).toEqual({ op: "remove_node", id: "nvda", cascade: true });
+  });
+
+  it("RESEARCH dispatches the expand lane and does NOT clear the board", async () => {
+    vi.mocked(generateStructured).mockResolvedValueOnce({ action: "RESEARCH", reason: "dig in" } as any);
+    const res = await runTako(req);
+    expect(runTakoExpand).toHaveBeenCalledTimes(1);
+    expect(runTakoInitial).not.toHaveBeenCalled();
+    expect(res.canvasOps.some((o: any) => o.op === "remove_node")).toBe(false);
+    expect(res.trace?.action).toBe("RESEARCH");
+  });
+
+  it("RESEARCH passes historyText to the expand lane", async () => {
+    vi.mocked(generateStructured).mockResolvedValueOnce({ action: "RESEARCH", reason: "dig in" } as any);
+    await runTako(req);
+    expect(runTakoExpand.mock.calls[0][1]).toBe("HIST");
   });
 
   it("empty board runs the initial pipeline WITHOUT a router call", async () => {
