@@ -307,12 +307,10 @@ the top hit.
 
 ```
 $ search?q=Apples&types=entity&limit=3
-{"results": [
-  {"id": "ent::apple::c1e1b1c7", "name": "Apple", "aliases": ["App Store","Apple Device","Apple Store","iOS","iPad","iPhone"], "description": "Apple ecosystem including iOS devices, iPhones, and iPads."},
-  {"id": "ent::apples::75f86514", "name": "Apples", "aliases": ["cooking apples","eating apples","fresh apples","malus domestica","raw apples"], "subtype": "Agricultural Products"},
-  {"id": "ent::apples::5107b449", "name": "Apples", "aliases": []}
-]}
+{"results":[{"id":"ent::apple::c1e1b1c7","type":"entity","name":"Apple","aliases":["App Store","Apple Device","Apple Store","iOS","iPad","iPhone"],"description":"Apple ecosystem including iOS devices, iPhones, and iPads."},{"id":"ent::apples::75f86514","type":"entity","name":"Apples","aliases":["cooking apples","eating apples","fresh apples","malus domestica","raw apples"],"subtype":"Agricultural Products"},{"id":"ent::apples::5107b449","type":"entity","name":"Apples","aliases":[]}]}
 ```
+(raw capture: `apples-search.json`, staging keyed, 2026-07-12 — the JSON body
+above is the saved file's exact content)
 
 Consistent with that thin typing, its `/related` overview is thin too — only
 `metrics` (total=11) and `entities` (total=37) `data` groups, no named
