@@ -213,8 +213,14 @@ async function resolveGraph(ctx: ResearchCtx, lookup: GraphLookup, researchNodeI
   const filters = dedupeCi(lookup.metricFilters).slice(0, MAX_METRIC_FILTERS);
   const subtype = lookup.subtype?.trim() || undefined;
 
-  const perName = await searchNames(ctx, graphCalls, names, subtype, onCall);
-  const ranked = rankNodes(perName);
+  let ranked: { node: GraphNode; from: string }[];
+  if (lookup.node) {
+    // Pre-resolved (cohort-roster member): the id is already exact — skip the search.
+    ranked = [{ node: { id: lookup.node.id, name: lookup.node.name, type: "entity" }, from: lookup.node.name }];
+  } else {
+    const perName = await searchNames(ctx, graphCalls, names, subtype, onCall);
+    ranked = rankNodes(perName);
+  }
   for (const r of ranked) ctx.resolved.push({ query: r.from, node: r.node.name });
 
   // Node-major node×filter pairs, truncated at the hard cap: full filter coverage of the

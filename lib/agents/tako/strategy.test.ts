@@ -408,3 +408,18 @@ describe("graphStrategy multi-entity query guard", () => {
     expect(plan.queries).toEqual(["Apple Revenue"]); // mechanical fallback from the planner terms
   });
 });
+
+describe("graphStrategy — pre-resolved node (lookup.node)", () => {
+  it("skips graph/search entirely and fans out metrics for exactly that node", async () => {
+    h.relatedByNode["ent::bulls::1"] = [{ id: "m1", name: "Attendance", aliases: [] }];
+    h.grounded = ["Chicago Bulls Attendance"];
+    const plan = await graphStrategy.leafQueries(
+      stubCtx(), "Chicago Bulls attendance",
+      { entities: ["Chicago Bulls"], metricFilters: ["attendance"], node: { id: "ent::bulls::1", name: "Chicago Bulls" } },
+    );
+    expect(h.searchCalls).toEqual([]); // NO entity search
+    expect(h.relatedCalls.every((c) => c.nodeId === "ent::bulls::1")).toBe(true);
+    expect(h.relatedCalls.length).toBeGreaterThan(0);
+    expect(plan.graph).toEqual([{ entity: "Chicago Bulls", related: ["Attendance"], kind: "entity" }]);
+  });
+});

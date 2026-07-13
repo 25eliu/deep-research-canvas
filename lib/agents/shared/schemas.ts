@@ -71,6 +71,10 @@ export interface GraphLookup {
   entities: string[];
   subtype?: string;
   metricFilters: string[];
+  // Pre-resolved graph node (e.g. a cohort-roster member): resolveGraph skips the
+  // entity search and fans out metrics for exactly this node. Set ONLY by code —
+  // never part of an LLM-facing Zod schema (ids must be un-hallucinatable).
+  node?: { id: string; name: string };
 }
 
 // Recursive decompose step: the LLM decides whether a research question is atomic
