@@ -9,7 +9,7 @@ import type { GraphCallRecord } from "../shared/types";
 import { generateStructured } from "../../llm";
 import { ctxBlock } from "../shared/ctx";
 import { zQueries, type GraphLookup } from "../shared/schemas";
-import { graphSearch, graphRelated, type GraphNode, type GraphItem } from "./graph";
+import { graphSearch, graphRelated, graphOverview, type GraphNode, type GraphItem, type GraphRelation } from "./graph";
 import { diversifyQueries } from "./queries";
 import {
   COMPOSE_SYSTEM, BROAD_COMPOSE_SYSTEM,
@@ -43,6 +43,72 @@ export interface QueryStrategy {
   // that research node's trace row ("graph_call" events).
   leafQueries(ctx: ResearchCtx, question: string, lookup: GraphLookup, nodeId?: string): Promise<QueryPlan>;
   broadQueries(ctx: ResearchCtx, question: string, lookup: GraphLookup, nodeId?: string): Promise<QueryPlan>;
+  // Optional cohort roster resolution — graphStrategy only
+  cohortRoster?(ctx: ResearchCtx, cohort: string, anchor: GraphLookup, nodeId?: string): Promise<CohortRoster | null>;
+}
+
+// ---- graph-grounded cohort roster (spec 2026-07-12) ----
+// A cohort question's member set, read straight off the anchor node's /related
+// OVERVIEW — exhaustive and pre-resolved (each member is a real graph node),
+// replacing LLM extraction from answer prose as the primary roster source.
+export interface RosterMember { id: string; name: string; aliases: string[] }
+export interface RosterGroup { key: string; kind: string; label: string; total: number; totalCapped: boolean; members: RosterMember[] }
+export interface CohortRoster {
+  anchor: { id: string; name: string };
+  groups: RosterGroup[];
+  graphCalls: GraphCallRecord[];
+  expand: (key: string) => Promise<RosterMember[]>;
+}
+
+const ROSTER_DRILL_LIMIT = 100; // one page of a drilled group — full roster context, bounded
+
+// graphOverview with the exact params + a per-GROUP results summary recorded into
+// `rec` (one row per group: key + "label — total") and mirrored live via onCall.
+async function recordedOverview(
+  rec: GraphCallRecord[], nodeId: string, subject: string, onCall?: (c: GraphCallRecord) => void,
+): Promise<GraphRelation[]> {
+  const params = { node_id: nodeId };
+  const t = Date.now();
+  try {
+    const { relations } = await graphOverview(nodeId);
+    const call: GraphCallRecord = {
+      endpoint: "graph/related", params, subject, ms: Date.now() - t,
+      results: relations.map((r) => ({ id: r.key, name: `${r.label} — ${r.totalCapped ? `>${r.total}` : r.total}` })),
+    };
+    rec.push(call);
+    onCall?.(call);
+    return relations;
+  } catch (e: unknown) {
+    const call: GraphCallRecord = { endpoint: "graph/related", params, subject, ms: Date.now() - t, results: [], error: errorMessage(e) };
+    rec.push(call);
+    onCall?.(call);
+    throw e;
+  }
+}
+
+function toMembers(items: GraphItem[]): RosterMember[] {
+  return items.filter((i) => i.id && i.name).map((i) => ({ id: i.id, name: i.name, aliases: i.aliases ?? [] }));
+}
+
+// Keep only groups that can BE a cohort: drop data (metrics) and source kinds
+// outright; drop capped sibling groups (">1000 Other Companies" enumerates the
+// whole class namespace, not this node's cohort); drop empty groups; and keep one
+// of each reciprocal pair (rel:competes_with / rel:competitors_of carry identical
+// member sets — same total + same inline ids ⇒ the same edge read both ways).
+export function cohortGroups(relations: GraphRelation[]): RosterGroup[] {
+  const seen = new Set<string>();
+  const out: RosterGroup[] = [];
+  for (const r of relations) {
+    if (r.kind === "data" || r.kind === "source") continue;
+    if (r.kind === "sibling" && r.totalCapped) continue;
+    const members = toMembers(r.items);
+    if (members.length === 0) continue;
+    const sig = `${r.total}|${members.map((m) => m.id).sort().join(",")}`;
+    if (seen.has(sig)) continue;
+    seen.add(sig);
+    out.push({ key: r.key, kind: r.kind, label: r.label, total: r.total, totalCapped: r.totalCapped, members });
+  }
+  return out;
 }
 
 interface ResolvedEntity {
@@ -444,6 +510,48 @@ export const graphStrategy: QueryStrategy = {
       ctx.notes.push(`broad compose failed — ${errorMessage(e)}`);
     }
     return { queries, graph, graphCalls, graphMs };
+  },
+  // Cohort roster: resolve the ANCHOR (the entity the class hangs off, or the
+  // class's own node) with the same subtype-filtered search + unfiltered retry the
+  // leaves use, then ONE overview call. Null (never throw) on any miss — the
+  // caller falls back to answer-prose extraction.
+  async cohortRoster(ctx, cohort, anchor, nodeId) {
+    const t = Date.now();
+    const graphCalls: GraphCallRecord[] = [];
+    const onCall = nodeId && ctx.emit
+      ? (call: GraphCallRecord) => ctx.emit!({ type: "graph_call", nodeId, call })
+      : undefined;
+    const names = dedupeCi(anchor.entities).slice(0, 3);
+    if (names.length === 0) {
+      ctx.notes.push(`cohort "${cohort.slice(0, 50)}" has no anchor entities — using answer-grounded resolution`);
+      return null;
+    }
+    try {
+      const perName = await searchNames(ctx, graphCalls, names, anchor.subtype?.trim() || undefined, onCall);
+      const ranked = rankNodes(perName);
+      if (ranked.length === 0) {
+        ctx.notes.push(`cohort anchor "${names[0]}" resolved no graph node — using answer-grounded resolution`);
+        return null;
+      }
+      const node = ranked[0].node;
+      const relations = await recordedOverview(graphCalls, node.id, node.name, onCall);
+      const groups = cohortGroups(relations);
+      if (groups.length === 0) {
+        ctx.notes.push(`no cohort-shaped relation groups on "${node.name}" — using answer-grounded resolution`);
+        return null;
+      }
+      return {
+        anchor: { id: node.id, name: node.name },
+        groups, graphCalls,
+        expand: async (key: string) =>
+          toMembers(await recordedRelated(graphCalls, node.id, { relation: key, limit: ROSTER_DRILL_LIMIT, subject: node.name }, onCall)),
+      };
+    } catch (e: unknown) {
+      ctx.notes.push(`cohort graph lookup failed — ${errorMessage(e)}`);
+      return null;
+    } finally {
+      ctx.timings.graph = Math.max(ctx.timings.graph, Date.now() - t);
+    }
   },
 };
 

@@ -15,6 +15,8 @@ const h = vi.hoisted(() => ({
   relatedByNode: {} as Record<string, any[]>,  // fixed graphRelated result per node id
   relatedByCall: [] as any[][],       // graphRelated result per successive call (fallback queue)
   relatedCalls: [] as any[],          // captured graphRelated {nodeId, ...opts}, in call order
+  overviewByNode: {} as Record<string, any>, // graphOverview relations per node id
+  overviewCalls: [] as string[],             // node ids overview was called for
 }));
 
 vi.mock("../../llm", () => ({
@@ -42,6 +44,12 @@ vi.mock("./graph", () => ({
     if (h.relatedByNodeQ[key]) return h.relatedByNodeQ[key];
     if (h.relatedByNode[nodeId]) return h.relatedByNode[nodeId];
     return h.relatedByCall.shift() ?? [];
+  }),
+  graphOverview: vi.fn(async (nodeId: string) => {
+    h.overviewCalls.push(nodeId);
+    const o = h.overviewByNode[nodeId];
+    if (o instanceof Error) throw o;
+    return { node: { id: nodeId, name: `node-${nodeId}`, type: "entity" }, relations: o ?? [] };
   }),
 }));
 
@@ -72,6 +80,7 @@ beforeEach(() => {
   h.leaf = []; h.broad = []; h.grounded = []; h.compose = []; h.prompts = [];
   h.searchNodes = []; h.entityNodesByTerm = {}; h.searchErrorByTerm = {}; h.searchCalls = [];
   h.relatedByNodeQ = {}; h.relatedByNode = {}; h.relatedByCall = []; h.relatedCalls = [];
+  h.overviewByNode = {}; h.overviewCalls = [];
 });
 
 describe("searchStrategy", () => {
@@ -421,5 +430,86 @@ describe("graphStrategy — pre-resolved node (lookup.node)", () => {
     expect(h.relatedCalls.every((c) => c.nodeId === "ent::bulls::1")).toBe(true);
     expect(h.relatedCalls.length).toBeGreaterThan(0);
     expect(plan.graph).toEqual([{ entity: "Chicago Bulls", related: ["Attendance"], kind: "entity" }]);
+  });
+});
+
+const REL = (over: Partial<{ key: string; kind: string; label: string; total: number; totalCapped: boolean; items: any[] }>) => ({
+  key: "rel:x", kind: "related", label: "X", total: 1, totalCapped: false, items: [], ...over,
+});
+const NBA_TEAMS = REL({
+  key: "rel:has_team", kind: "related", label: "Has team", total: 30,
+  items: [
+    { id: "ent::bulls::1", name: "Chicago Bulls", type: "entity", aliases: ["Bulls"] },
+    { id: "ent::knicks::1", name: "New York Knicks", type: "entity", aliases: [] },
+  ],
+});
+
+describe("graphStrategy.cohortRoster", () => {
+  it("resolves the anchor, reads the overview, and returns cohort-shaped groups", async () => {
+    h.entityNodesByTerm = { NBA: [{ id: "ent::nba::1", name: "National Basketball Association", type: "entity" }] };
+    h.overviewByNode["ent::nba::1"] = [NBA_TEAMS];
+    const ctx = stubCtx();
+    const roster = await graphStrategy.cohortRoster!(ctx, "NBA teams", lookup(["NBA"], ["attendance"]));
+    expect(roster).not.toBeNull();
+    expect(roster!.anchor.id).toBe("ent::nba::1");
+    expect(roster!.groups).toHaveLength(1);
+    expect(roster!.groups[0]).toMatchObject({ key: "rel:has_team", label: "Has team", total: 30 });
+    expect(roster!.groups[0].members[0]).toEqual({ id: "ent::bulls::1", name: "Chicago Bulls", aliases: ["Bulls"] });
+    expect(roster!.graphCalls.some((c) => c.endpoint === "graph/related")).toBe(true);
+  });
+
+  it("filters data/source kinds always, and sibling only when capped", async () => {
+    h.entityNodesByTerm = { Nvidia: [{ id: "ent::nv::1", name: "NVIDIA Corporation", type: "entity" }] };
+    h.overviewByNode["ent::nv::1"] = [
+      REL({ key: "metrics", kind: "data", label: "Related Metrics", total: 490, items: [{ id: "m1", name: "Revenues" }] }),
+      REL({ key: "sources", kind: "source", label: "Sources", total: 4, items: [{ id: "s1", name: "S&P Global" }] }),
+      REL({ key: "siblings", kind: "sibling", label: "Other Companies", total: 1000, totalCapped: true, items: [{ id: "e1", name: "Amazon.com, Inc." }] }),
+      REL({ key: "part_of", kind: "membership", label: "Part of", total: 2, items: [{ id: "g1", name: "Big Tech" }] }),
+    ];
+    const roster = await graphStrategy.cohortRoster!(stubCtx(), "big tech", lookup(["Nvidia"], ["revenue"]));
+    expect(roster!.groups.map((g) => g.key)).toEqual(["part_of"]);
+  });
+
+  it("dedupes reciprocal groups with identical member-id sets", async () => {
+    const items = [{ id: "e1", name: "Amazon.com, Inc." }, { id: "e2", name: "Microsoft Corporation" }];
+    h.entityNodesByTerm = { Nvidia: [{ id: "ent::nv::1", name: "NVIDIA Corporation", type: "entity" }] };
+    h.overviewByNode["ent::nv::1"] = [
+      REL({ key: "rel:competes_with", label: "Competes with", total: 181, items }),
+      REL({ key: "rel:competitors_of", label: "Competitors of", total: 181, items }),
+    ];
+    const roster = await graphStrategy.cohortRoster!(stubCtx(), "competitors", lookup(["Nvidia"], ["revenue"]));
+    expect(roster!.groups.map((g) => g.key)).toEqual(["rel:competes_with"]);
+  });
+
+  it("returns null (with a note) when the anchor does not resolve", async () => {
+    h.entityNodesByTerm = {}; h.searchNodes = [];
+    const ctx = stubCtx();
+    expect(await graphStrategy.cohortRoster!(ctx, "startups", lookup(["emerging startups"], ["revenue"]))).toBeNull();
+    expect(ctx.notes.some((n) => n.includes("cohort"))).toBe(true);
+  });
+
+  it("returns null when the overview fails or yields no cohort-shaped groups", async () => {
+    h.entityNodesByTerm = { X: [{ id: "x1", name: "X", type: "entity" }] };
+    h.overviewByNode["x1"] = new Error("overview down") as any;
+    const ctx = stubCtx();
+    expect(await graphStrategy.cohortRoster!(ctx, "c", lookup(["X"], ["y"]))).toBeNull();
+    h.overviewByNode["x1"] = [REL({ key: "metrics", kind: "data", items: [{ id: "m", name: "M" }] })];
+    expect(await graphStrategy.cohortRoster!(stubCtx(), "c", lookup(["X"], ["y"]))).toBeNull();
+  });
+
+  it("expand() drills the group by key with the roster limit", async () => {
+    h.entityNodesByTerm = { NBA: [{ id: "ent::nba::1", name: "National Basketball Association", type: "entity" }] };
+    h.overviewByNode["ent::nba::1"] = [NBA_TEAMS];
+    h.relatedByNode["ent::nba::1"] = Array.from({ length: 30 }, (_, i) => ({ id: `t${i}`, name: `Team ${i}`, aliases: [] }));
+    const roster = await graphStrategy.cohortRoster!(stubCtx(), "NBA teams", lookup(["NBA"], ["attendance"]));
+    const full = await roster!.expand("rel:has_team");
+    expect(full).toHaveLength(30);
+    const drill = h.relatedCalls.find((c) => c.relation === "rel:has_team");
+    expect(drill).toBeTruthy();
+    expect(drill.limit).toBe(100);
+  });
+
+  it("searchStrategy does not implement cohortRoster", () => {
+    expect(searchStrategy.cohortRoster).toBeUndefined();
   });
 });
