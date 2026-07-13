@@ -1,26 +1,29 @@
-// Final answer layer: the deep GPT model first runs a tool loop to gather the real
-// card CSV series it needs (get_card_contents), then composes a multi-block "answer
-// report" (verdict + comparison/leaderboard/sections/timeline/tiles/table/chart/prose)
-// by reconciling the structured branch results, gathered figures, and fetched card
-// contents. Every number is validated against real gathered figures + fetched CSV
-// values — anything untraceable is dropped and logged, so the report never shows a
-// hallucinated value.
+// Final answer layer, two phases. Phase A (fast model): a tool loop that sees only
+// CATALOGS — card titles/descriptions and web-source snippets, no raw data inlined —
+// and READS just the series/page content the report will need (get_card_contents /
+// get_web_content; cached series are instant, uncached fetches budgeted). Phase B
+// (deep model): composes a multi-block "answer report" (verdict + comparison/
+// leaderboard/sections/timeline/tiles/table/chart/prose) from the branch results,
+// gathered figures, web snippets, and ONLY the card contents Phase A chose to read.
+// Every number is validated against the gathered figures + the FULL per-turn CSV
+// cache (not just what Phase A re-read) — anything untraceable is dropped and
+// logged, so the report never shows a hallucinated value.
 import type { AnswerReport, AnswerBlock } from "../../schema";
 import type { TakoCallRecord } from "../shared/types";
 import { generateStructured, generateWithTools } from "../../llm";
 import { tool } from "ai";
 import { z } from "zod";
 import { zAnswerReport } from "../shared/schemas";
-import { ctxBlock } from "../shared/ctx";
 import { REPORT_SYSTEM, REPORT_GATHER_SYSTEM } from "./prompts";
 import { log } from "../../log";
-import { fetchContents, excerptCsv, SYNTH_ID, type ResearchCtx, type GatheredFigure } from "./flow";
+import { fetchContents, excerptCsv, type ResearchCtx, type GatheredFigure } from "./flow";
 
 const deepModel = () => process.env.SYNTH_MODEL || "gpt-5.4";
-const COMPOSER_CONTENTS_BUDGET = 8; // extra fetch headroom for the gather phase (cache hits are free)
-const COMPOSER_MAX_STEPS = 10;
+const COMPOSER_CONTENTS_BUDGET = 4; // extra fetch headroom for the gather phase (cache hits are free)
+const COMPOSER_MAX_STEPS = 6;
 const COMPOSER_CSV_EXCERPT = 2400; // larger than leaf excerpts — the composer charts real series
 const COMPOSER_CSV_ROWS = 60;
+const WEB_TOOL_CONTENT_CAP = 3000; // full-page excerpt served by get_web_content (already in memory)
 
 function errorMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
@@ -172,37 +175,51 @@ export function validateBlock(block: AnswerBlock, allowed: { strings: Set<string
   }
 }
 
-// Phase A: the gather tool loop. The deep model reads the card catalog and pulls
-// the REAL series it needs (both sides of a comparison, ranking members, …).
-// Returns the analyst note + everything fetched; failure returns empty (compose
-// proceeds without card contents — never throws).
+// Phase A: the gather tool loop. The model sees only CATALOGS — no raw data inlined —
+// and reads the series/page content the report will need. A cached card (a leaf
+// already pulled its CSV this turn) is served from the per-turn cache instantly with
+// no synthetic /v1/contents call; an uncached card costs a real, budgeted fetch.
+// Returns the analyst note + everything the model read; failure returns whatever was
+// read so far (compose proceeds without extra card contents — never throws).
 async function gatherCardContents(
   ctx: ResearchCtx, question: string,
-  catalog: { id: string; title: string; entity?: string; source?: string; description?: string }[],
+  catalog: { id: string; title: string; entity?: string; source?: string; description?: string; cached: boolean }[],
+  webs: { url: string; title: string; publisher?: string; snippet?: string }[],
 ): Promise<{ notes: string; fetched: Map<string, string> }> {
   const fetched = new Map<string, string>();
-  if (catalog.length === 0) return { notes: "", fetched };
+  if (catalog.length === 0 && webs.length === 0) return { notes: "", fetched };
   ctx.contents.cap = ctx.contents.fetched + COMPOSER_CONTENTS_BUDGET;
   try {
     // No reasoningEffort here: OpenAI rejects function tools + reasoning_effort on
-    // /v1/chat/completions for gpt-5.4 (verified live). Deep reasoning stays on the
-    // tool-free report emit below; the gather phase is a fetch decision, not analysis.
+    // /v1/chat/completions for gpt-5.4 (verified live). No deep model either — the
+    // gather phase is a read decision, not analysis; deep reasoning stays on the
+    // tool-free report emit below, and numeric validation guards the output.
     const res = await generateWithTools({
-      provider: "openai", model: deepModel(),
+      provider: "openai",
       system: REPORT_GATHER_SYSTEM,
-      prompt: `${ctxBlock(ctx.req)}\n\nQUESTION: ${question}\n\nCARD_CATALOG: ${JSON.stringify(catalog)}\n\nSUB_ANSWERS: ${JSON.stringify(ctx.branchResults.map((b) => ({ question: b.question, claim: b.claim })))}`,
+      prompt: `${ctx.ctxText}\n\nQUESTION: ${question}\n\nCARD_CATALOG: ${JSON.stringify(catalog)}\n\nWEB_SOURCES: ${JSON.stringify(webs)}\n\nSUB_ANSWERS: ${JSON.stringify(ctx.branchResults.map((b) => ({ question: b.question, claim: b.claim })))}`,
       maxSteps: COMPOSER_MAX_STEPS, label: "report-gather",
       tools: {
         get_card_contents: tool({
-          description: "Fetch the real underlying data series (CSV) behind a Tako card from CARD_CATALOG.",
+          description: "Read the real underlying data series (CSV) behind a Tako card from CARD_CATALOG. cached:true cards return instantly; cached:false cards cost a slow, budgeted network fetch.",
           parameters: z.object({ cardId: z.string() }),
           execute: async ({ cardId }) => {
+            // Already read this loop: answer from hand.
+            const had = fetched.get(cardId);
+            if (had) return excerptCsv(had, COMPOSER_CSV_EXCERPT, COMPOSER_CSV_ROWS);
             const f = ctx.ledger.list().find((x) => x.card.cardId === cardId);
             if (!f) return "unknown cardId";
+            // Cache hit (a leaf already pulled this series): serve from the per-turn
+            // cache — no network, no synthetic /v1/contents call in the trace.
+            const cached = f.card.webpageUrl ? ctx.contents.cache.get(f.card.webpageUrl) : undefined;
+            if (cached) {
+              fetched.set(cardId, cached);
+              return excerptCsv(cached, COMPOSER_CSV_EXCERPT, COMPOSER_CSV_ROWS);
+            }
             const t0 = Date.now();
             const csv = await fetchContents(ctx, f.card.webpageUrl);
             const call: TakoCallRecord = {
-              callId: `${SYNTH_ID}:contents:${ctx.calls.length}`, nodeId: SYNTH_ID,
+              callId: `${ctx.rootId}:contents:${ctx.calls.length}`, nodeId: ctx.rootId,
               query: f.title, endpoint: "/v1/contents", effort: "fast", ms: Date.now() - t0,
               cards: [{ id: cardId, title: f.title, source: f.source, url: f.url }],
               ...(csv ? {} : { error: "no data available" }),
@@ -212,6 +229,15 @@ async function gatherCardContents(
             if (!csv) return "no data available";
             fetched.set(cardId, csv);
             return excerptCsv(csv, COMPOSER_CSV_EXCERPT, COMPOSER_CSV_ROWS);
+          },
+        }),
+        get_web_content: tool({
+          description: "Read the full text behind a WEB_SOURCES entry (by its url) when the snippet is not enough. Instant — the page was already fetched this turn.",
+          parameters: z.object({ url: z.string() }),
+          execute: async ({ url }) => {
+            const w = ctx.webSources.find((s) => s.url === url);
+            if (!w) return "unknown url";
+            return (w.content || w.summary || "").slice(0, WEB_TOOL_CONTENT_CAP) || "no content available";
           },
         }),
       },
@@ -228,23 +254,31 @@ async function gatherCardContents(
 export async function composeReport(ctx: ResearchCtx, question: string): Promise<AnswerReport | null> {
   if (ctx.figures.length === 0 && ctx.branchResults.length === 0) return null;
 
-  const catalog = ctx.ledger.list()
-    .filter((f) => f.kind === "data_card")
-    .map((f) => ({
-      id: f.card.cardId, title: f.title, entity: f.section, source: f.source,
-      description: f.card.description?.slice(0, 200),
-    }));
+  const dataCards = ctx.ledger.list().filter((f) => f.kind === "data_card");
 
-  const { notes: analystNotes, fetched } = await gatherCardContents(ctx, question, catalog);
+  // Catalogs only — no raw CSV or page content is inlined into either phase. The
+  // gather loop reads what it needs; cached:true marks series a leaf already pulled
+  // (instant cache reads), so the model can read them freely.
+  const catalog = dataCards.map((f) => ({
+    id: f.card.cardId, title: f.title, entity: f.section, source: f.source,
+    description: f.card.description?.slice(0, 200),
+    cached: !!(f.card.webpageUrl && ctx.contents.cache.get(f.card.webpageUrl)),
+  }));
+  const webCatalog = ctx.webSources
+    .filter((w) => w.url)
+    .map((w) => ({ url: w.url!, title: w.title, publisher: w.source, snippet: w.summary }));
+
+  const { notes: analystNotes, fetched } = await gatherCardContents(ctx, question, catalog, webCatalog);
 
   const subAnswers = ctx.branchResults.map((b) => ({
     question: b.question, claim: b.claim, confidence: b.confidence,
     keyFigures: b.figures.map((f) => ({ label: f.label, value: f.value, entity: f.entity })),
   }));
   const figures = ctx.figures.map((f) => ({ label: f.label, value: f.value, entity: f.entity, source: f.source }));
+  // Snippets only — the full page content stayed behind the gather phase's
+  // get_web_content tool; what mattered is already distilled into ANALYST_NOTES.
   const webSources = ctx.webSources.map((w) => ({
     title: w.title, publisher: w.source, snippet: w.summary,
-    content: (w.content || w.summary || "").slice(0, 1500),
   }));
   const cardContents = Array.from(fetched.entries()).map(([id, csv]) => ({
     cardId: id,
@@ -252,12 +286,12 @@ export async function composeReport(ctx: ResearchCtx, question: string): Promise
     data: excerptCsv(csv, COMPOSER_CSV_EXCERPT, COMPOSER_CSV_ROWS),
   }));
 
-  const prompt = `${ctxBlock(ctx.req)}\n\nQUESTION: ${question}\n\nSUB_ANSWERS: ${JSON.stringify(subAnswers)}\n\nFIGURES: ${JSON.stringify(figures)}\n\nWEB_SOURCES: ${JSON.stringify(webSources)}\n\nCARD_CONTENTS: ${JSON.stringify(cardContents)}\n\nANALYST_NOTES: ${analystNotes || "(none)"}`;
+  const prompt = `${ctx.ctxText}\n\nQUESTION: ${question}\n\nSUB_ANSWERS: ${JSON.stringify(subAnswers)}\n\nFIGURES: ${JSON.stringify(figures)}\n\nWEB_SOURCES: ${JSON.stringify(webSources)}\n\nCARD_CONTENTS: ${JSON.stringify(cardContents)}\n\nANALYST_NOTES: ${analystNotes || "(none)"}`;
 
   let report: AnswerReport;
   try {
     report = await generateStructured({
-      provider: "openai", model: deepModel(), reasoningEffort: "high",
+      provider: "openai", model: deepModel(), reasoningEffort: "medium",
       system: REPORT_SYSTEM, prompt, schema: zAnswerReport, label: "answer-report",
     });
   } catch (e: unknown) {
@@ -265,10 +299,19 @@ export async function composeReport(ctx: ResearchCtx, question: string): Promise
     return null;
   }
 
-  // Validate every number against gathered figures PLUS the fetched CSV values.
+  // Validate every number against gathered figures PLUS every card CSV pulled this
+  // turn — the FULL per-turn cache, not just what the gather phase chose to read —
+  // so real values cited via sub-answers never get dropped as untraceable.
   const csvDerived: GatheredFigure[] = [];
+  const counted = new Set<string>();
   for (const [id, csv] of fetched) {
+    counted.add(id);
     csvDerived.push(...csvFigures(csv, catalog.find((c) => c.id === id)?.title || id));
+  }
+  for (const f of dataCards) {
+    if (counted.has(f.card.cardId)) continue;
+    const csv = f.card.webpageUrl ? ctx.contents.cache.get(f.card.webpageUrl) : undefined;
+    if (csv) csvDerived.push(...csvFigures(csv, f.title));
   }
   const allowed = allowedSets([...ctx.figures, ...csvDerived]);
   let dropped = 0;

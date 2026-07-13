@@ -44,8 +44,9 @@ function fakeCtx(overrides: Partial<any> = {}) {
     push: (o: any[]) => ops.push(...o),
     emit: (e: AgentEvent) => events.push(e),
     budget: { researchNodes: 2, maxNodes: 20 },
+    ctxText: "CTX",
     notes: [], figures: [], branchResults: [{ question: "nvidia revenue", claim: "up", confidence: 0.8, figures: [] }],
-    reasoning: [], tree: [], usedIds: new Set(["synth"]),
+    reasoning: [], tree: [], usedIds: new Set(["synth"]), rootId: "synth",
     _events: events, _ops: ops,
     ...overrides,
   } as any;

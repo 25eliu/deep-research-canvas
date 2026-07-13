@@ -3,10 +3,9 @@
 // gap runs the standard leaf flow (visible on canvas with gapFill:true) so its
 // findings land in the same ctx accumulators the composer reads.
 import { generateStructured } from "../../llm";
-import { ctxBlock } from "../shared/ctx";
 import { zGapPlan, type GapPlan } from "../shared/schemas";
 import { GAP_SYSTEM } from "./prompts";
-import { SYNTH_ID, derivedEdge, researchLeaf, uniqueResearchId, type ResearchCtx } from "./flow";
+import { derivedEdge, researchLeaf, uniqueResearchId, type ResearchCtx } from "./flow";
 
 const MAX_GAPS = 4;
 const deepModel = () => process.env.SYNTH_MODEL || "gpt-5.4";
@@ -35,9 +34,12 @@ export async function runGapRound(ctx: ResearchCtx, question: string): Promise<G
     plan = await generateStructured({
       provider: "openai", model: deepModel(),
       system: GAP_SYSTEM,
-      prompt: `${ctxBlock(ctx.req)}\n\nQUESTION: ${question}\n\nEVIDENCE: ${JSON.stringify(digest)}`,
+      prompt: `${ctx.ctxText}\n\nQUESTION: ${question}\n\nEVIDENCE: ${JSON.stringify(digest)}`,
       schema: zGapPlan, label: "gap-analysis",
-      reasoningEffort: "high",
+      // "medium": gap analysis is a checklist decision over a small digest (what's
+      // missing?), not analysis-grade reasoning — "high" cost ~25-30s serial before
+      // compose could start; the narrow-gap prompt rules + numeric validation guard it.
+      reasoningEffort: "medium",
     });
   } catch (e: unknown) {
     ctx.notes.push(`gap analysis failed — ${errorMessage(e)}`);
@@ -58,11 +60,12 @@ export async function runGapRound(ctx: ResearchCtx, question: string): Promise<G
     const nodeId = uniqueResearchId(ctx, g.question);
     ctx.emit?.({
       type: "reasoning", nodeId, depth: 1, question: g.question, kind: "gap",
-      rationale: g.why, entities: [g.entity], metrics: [g.metric],
+      rationale: g.why, entities: g.entities, subtype: g.subtype ?? undefined, metrics: g.metricFilters,
     });
     ctx.reasoning.push({ nodeId, question: g.question, rationale: g.why });
     try {
-      return await researchLeaf(g.question, 1, nodeId, false, ctx, [g.entity], [g.metric], g.why, { gapFill: true });
+      const lookup = { entities: g.entities, ...(g.subtype ? { subtype: g.subtype } : {}), metricFilters: g.metricFilters };
+      return await researchLeaf(g.question, 1, nodeId, false, ctx, lookup, g.why, { gapFill: true });
     } catch (e: unknown) {
       // A single gap-fill leaf failing (e.g. leaf-synth's streamAnswer rethrowing)
       // must not take down an otherwise-complete turn — note it and drop it, same
@@ -76,7 +79,7 @@ export async function runGapRound(ctx: ResearchCtx, question: string): Promise<G
   for (const r of results) {
     if (!r.nodeId || r.findingCount === 0) continue;
     filled++;
-    ctx.push([derivedEdge(r.nodeId, SYNTH_ID)]); // gap answer feeds the synthesis
+    ctx.push([derivedEdge(r.nodeId, ctx.rootId)]); // gap answer feeds the synthesis
   }
   return { ran: true, gaps, filled };
 }

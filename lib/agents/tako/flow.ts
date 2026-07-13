@@ -3,8 +3,9 @@ import type { AgentRequest, CanvasOp, CanvasNode } from "../../schema";
 import type { EmitFn, TraceTreeNode, TakoCallRecord, GraphCallRecord } from "../shared/types";
 import { generateStructured, streamAnswer } from "../../llm";
 import { ctxBlock } from "../shared/ctx";
-import { zWebFilter } from "../shared/schemas";
+import { zWebFilter, type GraphLookup } from "../shared/schemas";
 import { takoSearch, takoContents } from "../../tako";
+import type { GraphNode, GraphItem } from "./graph";
 import { FindingLedger, type Finding } from "./findings";
 import {
   WEB_FILTER_SYSTEM, LEAF_SYNTH_SYSTEM,
@@ -26,8 +27,8 @@ function slug(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "").slice(0, 40);
 }
 
-export function synthNode(headline: string, summary: string): CanvasNode {
-  return { id: SYNTH_ID, type: "text", role: "synthesis", title: headline || "Synthesis", summary, grounding: "tako", confidence: 0.9 };
+export function synthNode(id: string, headline: string, summary: string): CanvasNode {
+  return { id, type: "text", role: "synthesis", title: headline || "Synthesis", summary, grounding: "tako", confidence: 0.9 };
 }
 
 export function researchNode(id: string, question: string, summary: string, gapFill?: boolean): CanvasNode {
@@ -130,21 +131,29 @@ export function csvLatestFigure(csv: string, label: string, entity?: string, sou
 // Fetch the underlying data behind a card/web URL via the Tako contents API — deduped
 // per turn (cache) and capped (budget). A card URL → its CSV series; a web URL → page text.
 // Returns "" on cache-miss-with-no-budget or on error (never throws — content is a bonus).
-export async function fetchContents(ctx: ResearchCtx, url?: string): Promise<string> {
+// `onFetch` fires only for REAL network attempts (never cache hits) so callers can
+// record the API call in the trace without double-counting deduped reads.
+export async function fetchContents(
+  ctx: ResearchCtx, url?: string,
+  onFetch?: (info: { ms: number; error?: string }) => void,
+): Promise<string> {
   if (!url) return "";
   const cache = ctx.contents.cache;
   const hit = cache.get(url);
   if (hit !== undefined) return hit;
   if (ctx.contents.fetched >= ctx.contents.cap) return "";
   ctx.contents.fetched++;
+  const t0 = Date.now();
   try {
     const c = await takoContents(url, { mode: "inline" });
     const text = c.csv || c.text || "";
     cache.set(url, text);
+    onFetch?.({ ms: Date.now() - t0 });
     return text;
   } catch (e: unknown) {
     ctx.notes.push(`contents fetch failed for ${url} — ${errorMessage(e)}`);
     cache.set(url, "");
+    onFetch?.({ ms: Date.now() - t0, error: errorMessage(e) });
     return "";
   }
 }
@@ -155,6 +164,8 @@ export interface ResearchCtx {
   push: (ops: CanvasOp[]) => void;
   emit?: EmitFn;
   strategy: QueryStrategy;
+  rootId: string; // the synthesis (root) node id for THIS tree — SYNTH_ID for the initial run, a unique id for additive trees
+  ctxText: string; // prompt context block for THIS turn's planners (full board for the initial run, scoped for additive trees)
   budget: { researchNodes: number; readonly maxNodes: number };
   usedIds: Set<string>;
   notes: string[];
@@ -166,8 +177,15 @@ export interface ResearchCtx {
   seenSourceUrls: Set<string>; // dedup web sources by url across branches
   sourcesByNode: Map<string, WebSource[]>; // web sources used per answer node → rendered as its "see sources"
   contents: { fetched: number; cap: number; cache: Map<string, string> }; // tako-contents (CSV/text) fetch cache + budget
+  // Per-turn graph-resolve memo: entity searches by (name+subtype), related fan-outs by
+  // (nodeId+filter+limit). Gap fills and deep re-splits repeatedly resolve the SAME
+  // entity (observed: 4 concurrent gap leaves × ~8s each re-resolving one company) —
+  // the memo stores in-flight PROMISES so concurrent resolves share one request, and
+  // cache hits skip the network without recording a trace call (like contents.cache).
+  graphMemo: { search: Map<string, Promise<GraphNode[]>>; related: Map<string, Promise<GraphItem[]>> };
   figures: GatheredFigure[]; // every real number gathered this turn — the answer report validates against this
   branchResults: { question: string; claim: string; confidence: number; figures: GatheredFigure[] }[];
+  answerGrounded: boolean; // the root decompose was actually grounded by a /v1/answer (→ trace.answerUsed)
   // Flat authoritative accumulators — every Tako call and every reasoning step,
   // INCLUDING those on nodes that were later pruned (0-finding leaves). The tree
   // holds per-node copies for drill-down; these guarantee nothing is lost.
@@ -179,15 +197,19 @@ export interface ResearchCtx {
 export function newResearchCtx(
   req: AgentRequest, ledger: FindingLedger, push: ResearchCtx["push"],
   emit?: EmitFn, strategy: QueryStrategy = graphStrategy,
+  opts?: { rootId?: string; ctxText?: string },
 ): ResearchCtx {
+  const rootId = opts?.rootId ?? SYNTH_ID;
   return {
-    req, ledger, push, emit, strategy,
+    req, ledger, push, emit, strategy, rootId,
+    ctxText: opts?.ctxText ?? ctxBlock(req),
     budget: { researchNodes: 0, maxNodes: TOTAL_RESEARCH_CAP },
-    usedIds: new Set([SYNTH_ID]),
+    usedIds: new Set([rootId]),
     notes: [], tree: [], resolved: [], related: [], queries: [],
     webSources: [], seenSourceUrls: new Set(), sourcesByNode: new Map(),
     contents: { fetched: 0, cap: CONTENTS_CAP, cache: new Map() },
-    figures: [], branchResults: [],
+    graphMemo: { search: new Map(), related: new Map() },
+    figures: [], branchResults: [], answerGrounded: false,
     calls: [], reasoning: [],
     timings: { graph: 0, search: 0, decompose: 0, stream: 0 },
   };
@@ -203,12 +225,16 @@ export function uniqueResearchId(ctx: ResearchCtx, question: string): string {
 
 export async function researchLeaf(
   question: string, depth: number, nodeId: string, root: boolean, ctx: ResearchCtx,
-  entities: string[], metrics: string[], rationale?: string, opts?: { gapFill?: boolean },
+  lookup: GraphLookup, rationale?: string, opts?: { gapFill?: boolean; startedAt?: number },
 ): Promise<ResearchResult> {
-  const { queries, graph, metrics: planMetrics, graphCalls, graphMs } = await ctx.strategy.leafQueries(ctx, question, entities, metrics);
-  // The strategy may have enriched the planner's metric guesses with graph-confirmed
-  // canonical names — the tree records the enriched list as the authoritative one.
-  const treeMetrics = planMetrics ?? metrics;
+  // The leaf's whole wall-clock: graph resolve + searches + contents + synth. The caller
+  // passes startedAt when work for this node began earlier (research()'s decompose).
+  const t0 = opts?.startedAt ?? Date.now();
+  const { queries, graph, metrics: planMetrics, graphCalls, graphMs } = await ctx.strategy.leafQueries(ctx, question, lookup, nodeId);
+  // The tree records the planner's metric filters (a strategy may still override via
+  // plan.metrics, though neither built-in strategy sets it today).
+  const treeMetrics = planMetrics ?? lookup.metricFilters;
+  const entities = lookup.entities;
   ctx.queries.push(...queries);
 
   // The empty research node must exist before any of its finding/token ops.
@@ -230,7 +256,20 @@ export async function researchLeaf(
   // (so the report can cite an up-to-date value), and the series feeds the leaf synthesis.
   const csvByFinding = new Map<string, string>();
   await Promise.all(dataFindings.map(async (f) => {
-    const csv = await fetchContents(ctx, f.card.webpageUrl);
+    // Each real CSV pull is a Tako API call — record it on this node (before the
+    // tree snapshot below) and stream it live, so the trace audits data fetches
+    // exactly like searches.
+    const csv = await fetchContents(ctx, f.card.webpageUrl, (info) => {
+      const call: TakoCallRecord = {
+        callId: `${nodeId}:contents:${calls.length}`, nodeId,
+        query: f.title, endpoint: "/v1/contents", effort: "fast", ms: info.ms,
+        cards: [{ id: f.card.cardId, title: f.title, source: f.source, url: f.url }],
+        ...(info.error ? { error: info.error } : {}),
+      };
+      calls.push(call);
+      ctx.calls.push(call);
+      ctx.emit?.({ type: "tako_call", call });
+    });
     if (!csv) return;
     csvByFinding.set(f.nodeId, csv);
     const fig = csvLatestFigure(csv, f.title, f.section, f.source);
@@ -240,9 +279,9 @@ export async function researchLeaf(
   // Root: never stream prose — the composed answer report (Claude, at the end)
   // is the answer. Create the empty synth block and record this leaf's material.
   if (root) {
-    ctx.push([{ op: "add_node", node: synthNode("", "") }]);
+    ctx.push([{ op: "add_node", node: synthNode(ctx.rootId, "", "") }]);
     ctx.branchResults.push({ question, claim: "", confidence: found > 0 ? 0.8 : 0.3, figures });
-    ctx.tree.push({ nodeId, depth, question, kind: "leaf", findingCount: found, children: [], queries, rationale, entities, metrics: treeMetrics, graph, calls, graphCalls, graphMs, ...(opts?.gapFill ? { gapFill: true } : {}) });
+    ctx.tree.push({ nodeId, depth, question, kind: "leaf", findingCount: found, children: [], queries, rationale, entities, subtype: lookup.subtype, metrics: treeMetrics, graph, calls, graphCalls, graphMs, totalMs: Date.now() - t0, ...(opts?.gapFill ? { gapFill: true } : {}) });
     return { nodeId, title: question, synthesis: "", findingCount: found, children: [], depth, kind: "leaf" };
   }
 
@@ -261,7 +300,7 @@ export async function researchLeaf(
   const st = Date.now();
   const prose = await streamAnswer({
     provider: OPENAI, system: LEAF_SYNTH_SYSTEM,
-    prompt: `${ctxBlock(ctx.req)}\n\nSUB_QUESTION: ${question}\n\nFINDINGS: ${JSON.stringify(menu)}\n\nWEB_SOURCES: ${JSON.stringify(webMenu)}`,
+    prompt: `${ctx.ctxText}\n\nSUB_QUESTION: ${question}\n\nFINDINGS: ${JSON.stringify(menu)}\n\nWEB_SOURCES: ${JSON.stringify(webMenu)}`,
     label: "leaf-synth",
     onToken: (c) => ctx.emit?.({ type: "token", text: c, nodeId }),
   });
@@ -276,7 +315,7 @@ export async function researchLeaf(
     ...(queries.length ? { searches: queries } : {}),
     ...(leafSources.length ? { sources: leafSources } : {}),
   } }]);
-  ctx.tree.push({ nodeId, depth, question, kind: "leaf", findingCount: found, children: [], queries, rationale, entities, metrics: treeMetrics, graph, calls, graphCalls, graphMs, ...(opts?.gapFill ? { gapFill: true } : {}) });
+  ctx.tree.push({ nodeId, depth, question, kind: "leaf", findingCount: found, children: [], queries, rationale, entities, subtype: lookup.subtype, metrics: treeMetrics, graph, calls, graphCalls, graphMs, totalMs: Date.now() - t0, ...(opts?.gapFill ? { gapFill: true } : {}) });
   return { nodeId, title: question, synthesis: prose, findingCount: found, children: [], depth, kind: "leaf", claim, confidence: 0.8 };
 }
 
@@ -294,7 +333,7 @@ export async function filterWebSources(question: string, candidates: Finding[], 
     const menu = candidates.map((f, i) => ({ i, title: f.title, source: f.source, snippet: f.card.description }));
     const res = await generateStructured({
       provider: OPENAI, system: WEB_FILTER_SYSTEM,
-      prompt: `${ctxBlock(ctx.req)}\n\nQUESTION: ${question}\n\nSOURCES: ${JSON.stringify(menu)}`,
+      prompt: `${ctx.ctxText}\n\nQUESTION: ${question}\n\nSOURCES: ${JSON.stringify(menu)}`,
       schema: zWebFilter, label: "web-filter",
     });
     const keep = new Set(res.useful.filter((n) => n >= 0 && n < candidates.length).slice(0, 4));
