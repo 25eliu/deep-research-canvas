@@ -712,6 +712,25 @@ describe("graph-grounded cohort resolution", () => {
     expect(result.trace.notes?.some((n: string) => n.includes("Has team"))).toBe(true);
   });
 
+  it("notes when no sub-question entities match any roster member — name-only degradation still researches", async () => {
+    // Neither sub-question's entity appears in teamsGroup's members (Bulls/Knicks/Lakers),
+    // so groundSubsWithRoster finds zero matches — chosen stays null — and must note the
+    // degradation instead of silently proceeding. The leaves still get researched by name
+    // (no pre-resolved node id survives), so graphSearch runs for the un-matched name.
+    const noMatchSubs = [
+      { question: "Boston Celtics attendance", entities: ["Boston Celtics"], metricFilters: ["attendance"] },
+      { question: "Miami Heat attendance", entities: ["Miami Heat"], metricFilters: ["attendance"] },
+    ];
+    h.plans[Q] = firstPass;
+    h.plans[`${Q}::groups`] = { atomic: false, rationale: "per member", entities: ["National Basketball Association"], metricFilters: ["attendance"], subQuestions: noMatchSubs };
+    h.overview = [teamsGroup];
+    const { graphSearch } = await import("./graph");
+    const result = await runTakoInitial(nbaReq, () => {});
+    expect(result.trace.notes?.some((n: string) => n.includes("no member names matched"))).toBe(true);
+    const searched = (graphSearch as any).mock.calls.map((c: any[]) => c[0]);
+    expect(searched).toContain("Boston Celtics"); // name-only degradation still researches
+  });
+
   it("falls back to the answer-grounded path when the overview yields no cohort groups", async () => {
     h.plans[Q] = firstPass;
     h.overview = []; // no groups → roster null

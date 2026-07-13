@@ -183,6 +183,8 @@ async function groundSubsWithRoster(
         ctx.notes.push(`cohort roster drill failed — ${errorMessage(e)}`);
       }
     }
+  } else if (roster.groups.length > 0) {
+    ctx.notes.push(`cohort roster fetched but no member names matched the sub-questions — proceeding name-only`);
   }
   return grounded;
 }
