@@ -93,6 +93,9 @@ export const zResearchPlan = z.object({
   // startups") rather than a nameable one — the caller resolves real members via a
   // grounded tako answer, then re-decomposes per member (root-level only).
   cohort: z.string().optional(),
+  // Root only: the split itself depends on discovering CURRENT data (live drivers,
+  // unknown current members/rankings) — the caller grounds via /v1/answer and re-plans.
+  needsFreshContext: z.boolean().optional(),
   subQuestions: z.array(z.object({
     question: z.string(),
     rationale: z.string().optional(), // why this facet matters (optional per-sub reasoning)
@@ -129,3 +132,16 @@ export const zGapPlan = z.object({
   })),
 });
 export type GapPlan = z.infer<typeof zGapPlan>;
+
+// Cross-links: 0-3 semantic edges from a NEW research tree's root to directly-related
+// EXISTING board nodes. `from` is always the sentinel "SELF_ROOT" (rewritten to the
+// real root id by the lane); `to` must be an existing node id (validated downstream).
+export const zCrossLinks = z.object({
+  links: z.array(z.object({
+    from: z.string(),
+    to: z.string(),
+    kind: z.enum(["supports", "contradicts"]),
+    reason: z.string(),
+  })).max(3),
+});
+export type CrossLinks = z.infer<typeof zCrossLinks>;

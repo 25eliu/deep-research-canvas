@@ -15,7 +15,9 @@ Rules:
   EMPTY list — { queries: [] } is the CORRECT answer there. NEVER compose queries from an irrelevant menu just
   because the data exists ("Infer, Inc.'s Aggregate Value Raised" answers nothing about the AI inference
   market). The caller has a fallback that searches the sub-question's own terms directly — an empty list
-  hands over to it; junk queries block it.
+  hands over to it; junk queries block it. Tako search itself falls back to WEB SOURCES when structured data
+  is thin, so a focused, question-faithful ask still gathers usable evidence. ANSWERING the SUB_QUESTION is
+  the goal; the RESOLVED menu is the preferred means, never the goal.
 - Every query is a DATA-RETRIEVAL ask that fetches ONE series: subject + metric name (+ optional time
   qualifier), in short search style — "US shelter CPI this year", "Nvidia data center revenue last
   quarter", "Costco Wholesale Gross Merchandise Value 2025". The short form retrieves cards the long
@@ -49,15 +51,18 @@ entirely different subjects (e.g. question about "emerging infrastructure startu
 Inc." or the town "Startup, WA"). If NOTHING in RESOLVED genuinely relates to the question, return an
 EMPTY list — { queries: [] } is the CORRECT answer; NEVER force overview queries from an irrelevant menu just
 because the data exists ("Startup, WA: Median Sales Price" answers nothing about startups).
-Given the QUESTION and RESOLVED entities, write the query (or two) that best captures the headline/overview
-data for the whole question (e.g. the overall inflation rate, or the headline metric). Keep it high-level.
+Given the QUESTION and RESOLVED entities, write AT MOST the single query (two only for a two-entity
+comparison) that best captures the headline/overview data for the whole question (e.g. the overall inflation
+rate, or the headline metric). Keep it high-level. Sub-agents already own the per-facet data: when the prompt
+includes ALREADY_FOUND (titles of cards the sub-questions already fetched), return { queries: [] } if those
+cards already contain the headline/overview series — NEVER re-query a surface a listed card already covers.
 Each query is a DATA-RETRIEVAL ask in short search style — subject + metric (+ time qualifier), like
 "US inflation rate this year". Searches COLLECT data; analysis happens later — NEVER analytical/causal
 phrasing ("how has X affected Y", "impact of X on Y", "why did X change").
 Each query names exactly ONE entity/subject — Tako search can't handle multi-entity queries. For a two-entity
 comparison use both slots: one headline query per entity, same measure.
 Every query must pair a concrete subject (entity, country, region) with a measure — never a bare metric name alone.
-Return { queries: string[] } — 1 to 2 queries.`;
+Return { queries: string[] } — 0 to 2 queries, the fewer the better.`;
 
 export const SYNTH_SYSTEM = `You are the reasoning core of a spatial research canvas grounded in Tako structured data.
 ${ROUTER}
@@ -71,7 +76,7 @@ Return canvasOps, a <=2 sentence narration, and sideReply (usually null on NEW_B
 // Every question resolves to a validated entity-first LOOKUP — 1-3 candidate names for
 // ONE subject + an optional entity-class subtype + 1-3 metric substring filters.
 export const DECOMPOSE_SYSTEM = `You decide whether a research question should be split into sub-questions or answered directly from data.
-Return { atomic: boolean, rationale: string, entities: string[], subtype?: string|null, metricFilters: string[], cohort?: string, subQuestions?: [{ question, rationale?, entities: string[], subtype?: string|null, metricFilters: string[] }] }.
+Return { atomic: boolean, rationale: string, entities: string[], subtype?: string|null, metricFilters: string[], cohort?: string, needsFreshContext?: boolean, subQuestions?: [{ question, rationale?, entities: string[], subtype?: string|null, metricFilters: string[] }] }.
 - An entity must be CONCRETE, individually nameable (a specific company, country, commodity, index). An entity
   CLASS or category ("AI companies", "emerging infrastructure startups", "chip makers") is NOT an entity: when
   the question's subject is a class, set \`cohort\` to that class phrase, return atomic:false with NO
@@ -99,12 +104,19 @@ Return { atomic: boolean, rationale: string, entities: string[], subtype?: strin
   subs — never "rank <class> by <metric>" or "compare <class> on <metric>" ("rank AI companies by employee
   count" is NOT a researchable sub-question; ranking across entities is the final report's job, fed by
   per-entity results).
+- \`needsFreshContext\`: set true ONLY when you cannot pick the RIGHT sub-questions without current, live
+  data — the drivers of something "right now" that must be read from fresh evidence, a current ranking or
+  moving situation whose members/facets you cannot name. The caller then fetches a grounded answer and
+  re-invokes you with a GROUNDED_ANSWER block — still return your best plan in THIS response. Leave it
+  false/omitted when the facets are canonical domain knowledge (researching a company → financials, stock,
+  operations, outlook) or the question names its own subjects — splitting those needs no lookup.
 - When the prompt contains a GROUNDED_ANSWER (with CARD_TITLES), it is real Tako evidence for this exact
   question — plan FROM it: prefer subjects and measures the answer's prose and card titles actually name
   (they are what Tako demonstrably has), and use its content to pick the genuinely distinct facets/drivers
   instead of guessing them from the question text. Do NOT invent niche facets the grounding gives no signal
-  for — the question's canonical components (below) are always fair game. \`entities\`/\`metricFilters\`
-  remain graph LOOKUPS as specified below.
+  for — the question's canonical components (below) are always fair game. A thin, empty, or absent
+  GROUNDED_ANSWER NEVER justifies fewer sub-questions or going atomic: canonical facets stand on their own.
+  \`entities\`/\`metricFilters\` remain graph LOOKUPS as specified below.
 - Broad multi-factor/driver questions decompose into their well-known canonical components FROM DOMAIN
   KNOWLEDGE, even when no grounding is present: "what's driving inflation" → energy, shelter/housing,
   food, wages — one sub-question per component, each with its own geography entity + facet filter
@@ -137,22 +149,40 @@ Return { atomic: boolean, rationale: string, entities: string[], subtype?: strin
   response — 2 to {MAX}, one per facet, each with its own entities/subtype/metricFilters. The ONLY
   exception is the cohort signal (atomic:false + \`cohort\` + no subQuestions). A rationale that describes
   a split while subQuestions is missing or has fewer than 2 entries is an INVALID plan.
-- SPLIT (atomic:false) whenever the question names MORE than one subject or more than one measure — every
-  comparison, every "versus", basically every "and": one sub-question per subject, per measure facet.
-  "Nvidia vs AMD data-center revenue" → 2 subs (one per company, same measure).
-  "Compare Nvidia and AMD revenue growth and gross margins" → 4 subs (subject × measure).
-  "How are energy and gasoline prices contributing to inflation?" → 2 subs (one per subject).
-  Also split broad multi-driver questions into their distinct facets, each facet reduced to one subject + one measure.
+- SPLIT (atomic:false) in BOTH of these cases. (1) The question names MORE than one subject: one sub-question
+  per DISTINCT subject — every comparison, every "versus" ("Nvidia vs AMD data-center revenue" → 2 subs, one
+  per company, same measure; "How are energy and gasoline prices contributing to inflation?" → 2 subs, one
+  per subject). (2) A single-subject question spans multiple DISTINCT facets, drivers, or analysis surfaces:
+  one sub-question per facet ("what's driving inflation" splits per driver; "how is Apple doing" splits into
+  stock performance + revenue/earnings). A broad "research X" / "tell me about X" / "all information about X"
+  request is ALWAYS a multi-facet split, never one lookup: "research all the updated company information of
+  Toyota" → one sub per facet — financial results (entities ["Toyota Motor Corporation", "Toyota"],
+  metricFilters ["revenue", "earnings"]), stock performance (["stock price"]), production/deliveries
+  (["production", "sales volume"]). ATOMIC is ONLY for one subject + one measure.
+  The folding brake applies WITHIN a facet, never across facets: two ADJACENT measures of the same analysis
+  surface belong in ONE sub-question carrying both fragments in its metricFilters — the sub-agent runs
+  several searches and covers both. "Compare Nvidia and AMD revenue growth and gross margins" → 2 subs (one
+  per company, metricFilters ["revenue", "margin"]), NOT 4. But a genuinely different analysis surface (a
+  different dataset, geography, time frame, or driver) is a FACET and gets its own sub-question.
+  Also split broad multi-driver questions into their distinct, well-known facets — cover the real drivers
+  (do not invent niche ones), each reduced to one subject + its measure fragments.
 - HOW STRONGLY to lean toward atomic vs. split depends on the LEVEL of this question — the caller appends a
   per-level instruction below. Follow it.
-- Sub-questions must be SPECIFIC and non-overlapping. The overarching/broad view is fetched by the parent —
-  do NOT create a sub-question for the general/overview topic, and do NOT let two sub-questions cover the
-  same surface or reword the same lookup.
+- Sub-questions must CUMULATIVELY ANSWER THE PARENT question: together they assemble the parent's answer,
+  and each contributes a DISTINCT, NECESSARY piece of it. Before returning, CHECK every sub against the set:
+  (a) if deleting a sub-question's answer would NOT change the parent's answer, DROP it — it doesn't
+  contribute; (b) if two sub-questions would return overlapping information (same subject with the same or
+  overlapping measures, or one sub covering the UNION of other subs), MERGE them into one; (c) no
+  sub-question may restate or paraphrase the parent question itself, and none may cover the
+  general/overview topic — the parent owns the broad view.
   Example "what is affecting inflation" → GOOD subs: "energy/gas prices", "shelter & housing costs",
   "wage growth", "food prices". BAD subs: "the overall inflation rate" (broad view, owned by the parent),
-  or two subs both about "prices generally".
-- Create ONE sub-question per subject×measure the question needs — as few as 2, up to {MAX}. Never pad to
-  reach a number; a question with many real subject×measure combinations SHOULD spread wide (do not stop at 3).
+  two subs both about "prices generally", or "shelter costs" AND "housing costs" as separate subs (the
+  same surface twice — one sub, filters ["shelter", "housing"]).
+- Create ONE sub-question per genuinely distinct facet/subject the answer needs — typically 2-5, up to {MAX}.
+  Do not drop a real facet to save a slot, and never pad to reach a number or invent niche facets the
+  question doesn't ask for. Before returning, CHECK the set: MERGE any two sub-questions whose lookups could
+  return the same data.
 - Also populate the top-level entities + metricFilters: the single most representative lookup for the broad view.
 - The lookup fields are GRAPH LOOKUPS, and matching is by KEYWORD against node names and aliases, never
   semantic. \`entities\` are searched in the graph's ENTITY namespace; each resolved entity node's available
@@ -185,9 +215,10 @@ Return { atomic: boolean, rationale: string, entities: string[], subtype?: strin
   "restaurant margins" → "margin"; "unit economics" → "margin" + "cost" (no metric is NAMED
   "economics"); "year-to-date stock performance" → "stock price". RETURN A LIST, not one filter:
   each extra fragment is another chance to catch how the series is actually named — a lone filter
-  that misses leaves the lookup empty. Cover the naming variants of the measure ("revenue" +
-  "sales" + "turnover"; "profit" + "margin" + "income") and the question's 1-2 measure facets —
-  breadth over the SAME measure, not unrelated measures.
+  that misses leaves the lookup empty. Cover the naming variants of each measure ("revenue" +
+  "sales" + "turnover"; "profit" + "margin" + "income") and the sub-question's 1-2 measure facets —
+  a sub-question carrying two related measures lists a fragment for each ("revenue" + "margin");
+  never unrelated measures the sub-question does not ask about.
 - A sub-question's metricFilters measure the sub-question's OWN subject — never the outcome/target variable
   the parent question is explaining. In "what is driving X", X belongs to the PARENT's lookup; each
   sub-question's filters name ITS facet's series. This applies to EVERY driver sub-question, no exceptions:
@@ -261,21 +292,27 @@ Rules: no [n] citation markers, no sources/links list (the cards carry their own
 traceable to the sub-answers / broad findings — never invent a number or source. Never comment on missing or
 absent data; omit unavailable figures silently.`;
 
-// Phase A of the final layer: the deep GPT model reads the card catalog and pulls
-// the REAL underlying series it needs via a tool loop before the report is written.
+// Phase A of the final layer: the fast model reads the card/web catalogs and READS
+// (via tools) only the underlying data the final report will actually need — nothing
+// is inlined up front, which keeps the composer's input small.
 export const REPORT_GATHER_SYSTEM = `You prepare the FINAL ANSWER for a research question. You are given SUB_ANSWERS,
-FIGURES, WEB_SOURCES, and CARD_CATALOG — every real Tako data card found this turn ({id, title, entity, source, description}).
-You have ONE tool: get_card_contents(cardId) → the card's REAL underlying data series as CSV.
-Fetch the series you need to answer precisely — ALWAYS fetch both/all sides of a comparison, the members of a
-ranking, and any series you intend to chart. Do NOT fetch cards irrelevant to the question. Then reply with a
-SHORT analyst note (<=150 words): what the fetched data shows, which cards matter most, and any conflict between
-sources. Plain text only.`;
+CARD_CATALOG — every real Tako data card found this turn ({id, title, entity, source, description, cached}) — and
+WEB_SOURCES ({url, title, publisher, snippet}). No raw data is inlined: you DECIDE what to read via tools:
+- get_card_contents(cardId) → the card's REAL underlying data series as CSV. cached:true cards return instantly
+  (a sub-question already pulled them this turn); cached:false cards cost a slow, budgeted network fetch — use
+  those sparingly.
+- get_web_content(url) → the full text behind a WEB_SOURCES entry, when its snippet is not enough. Instant.
+READ what the report needs to be precise: every comparison side, ranking member, or chart series the final
+report should draw MUST be read here — the report can only chart series you read. Skip cards that merely
+restate a sub-answer's headline number; the SUB_ANSWERS already carry those. Read web content only for a
+load-bearing source. Then reply with a SHORT analyst note (<=150 words): what the data shows, which cards
+matter most, and any conflict between sources. Plain text only.`;
 
 // Phase B of the final layer (GPT): reconcile the evidence and compose a multi-block answer report.
 export const REPORT_SYSTEM = `You are the lead analyst composing the FINAL ANSWER as a clear, well-made report for the top of a research canvas.
 You are given the QUESTION, SUB_ANSWERS (each {question, claim, keyFigures, confidence}), the full gathered FIGURES
-(every real number available this turn, each {label, value, entity, source}), WEB_SOURCES (title, publisher, snippet,
-content excerpt), CARD_CONTENTS (real CSV series fetched from Tako cards this turn), and ANALYST_NOTES.
+(every real number available this turn, each {label, value, entity, source}), WEB_SOURCES (title, publisher, snippet),
+CARD_CONTENTS (the real CSV series the gather phase chose to read this turn), and ANALYST_NOTES.
 GROUND THE ANSWER IN THE TAKO DATA FIRST — FIGURES, CARD_CONTENTS and SUB_ANSWERS are the backbone; use WEB_SOURCES
 for context, recency, and drivers. RECONCILE the evidence into a decisive verdict.
 Return { verdict, blocks } — an ORDERED list of representation blocks. CHOOSE THE SHAPE THAT FITS THE QUESTION:
@@ -294,14 +331,20 @@ Draw on WEB_SOURCES for qualitative context; name the publisher inline (e.g. "pe
 
 export const SEARCH_LEAF_COMPOSE_SYSTEM = `You write Tako /v3/search queries that answer ONE specific sub-question, working from the question text ALONE (no knowledge graph).
 - Output 1-3 queries. Each must be a DISTINCT angle on the sub-question (a different metric, facet, or entity) — never near-duplicates.
+- Ask exactly what the SUB_QUESTION needs to be ANSWERED. Tako search falls back to WEB SOURCES when
+  structured data can't cover a query — so stay faithful to the question rather than contorting it toward
+  guessed metric phrasing.
 - Write each as a short search-style noun phrase a data search engine would match: entity + measure + qualifier (e.g. "US gasoline prices 2024", "Nvidia data center revenue"). NOT a full sentence, no question marks.
 - Each query names exactly ONE entity — Tako search can't handle multi-entity queries; never "X vs Y" or
   "compare X and Y". For a comparison, write one query per entity on the same measure.
 - If the sub-question is a single simple ask, ONE query is correct — do not pad to three.
 Return { queries }.`;
 
-export const SEARCH_BROAD_COMPOSE_SYSTEM = `You write 1-2 Tako /v3/search queries for the BROAD/overview view of the user's overall question, working from the question text ALONE (no knowledge graph).
-- 1-2 queries max, each capturing a headline/overview measure for the whole question.
+export const SEARCH_BROAD_COMPOSE_SYSTEM = `You write 0-2 Tako /v3/search queries for the BROAD/overview view of the user's overall question, working from the question text ALONE (no knowledge graph).
+- AT MOST the single headline/overview query (two only for a two-entity comparison); the fewer the better.
+- Sub-agents already own the per-facet data: when the prompt includes ALREADY_FOUND (titles of cards the
+  sub-questions already fetched), return { queries: [] } if those cards already contain the headline series —
+  NEVER re-query a surface a listed card already covers.
 - Each query names exactly ONE entity/subject — Tako search can't handle multi-entity queries. For a
   comparison, use both slots: one query per subject, same measure.
 - Short search-style noun phrases, not sentences; no near-duplicates.
@@ -347,6 +390,12 @@ Decide whether the evidence can answer the question DECISIVELY. List ONLY gaps t
 - a ranking/"top N" missing obvious members
 - a claimed factor/driver with no metric behind it
 - a headline series that is clearly stale for a "now/current" question
+Each gap must be a NARROW lookup — ONE concrete subject + one measure — that serves answering the original
+QUESTION decisively. NEVER a restatement or broad/overview version of QUESTION itself ("which components
+contribute most to X" IS the question, not a gap), and never an analysis/ranking ask — ranking and
+reconciliation are the final report's job, fed by per-subject data. Before listing a gap, CHECK the EVIDENCE
+digest: a surface an existing subAnswer or card already covers is NOT a gap — list only what is genuinely
+MISSING, never a better version of what exists.
 Each gap is a ready-to-run lookup: {question, entities, subtype?, metricFilters, why} for ONE subject —
 entities = 1-3 completely different candidate names for that one subject ("Advanced Micro Devices", "AMD");
 subtype = one of these graph entity classes copied verbatim when it clearly fits, else omit/null:
@@ -403,3 +452,11 @@ Return { question, rationale, entities, subtype?, metricFilters }.
 - metricFilters: 2-5 case-insensitive substring fragments of metric NAMES ("revenue", "margin", "stock price")
   — one word preferred, never the subject/domain, list naming variants of the SAME measure.
 - rationale: 1 sentence — why this lookup answers the request.`;
+
+export const CROSSLINK_SYSTEM = `You connect a NEW research finding to EXISTING nodes on a research canvas — ONLY where there is a genuine, direct relationship.
+You are given NEW_TREE (the new question + the sub-question titles just added) and EXISTING_NODES (id + title + summary of what is already on the board, possibly from unrelated investigations).
+Return { links: [...] } with 0 to 3 links. Each link: { from: "SELF_ROOT", to: "<an EXISTING_NODES id>", kind: "supports" | "contradicts", reason: "<short why>" }.
+- "from" is ALWAYS the literal string "SELF_ROOT" (the new tree's root).
+- Use "supports" when the new finding reinforces/extends the existing node; "contradicts" when it points the other way.
+- Link ONLY on a real topical/causal relationship (same entity, same metric, directly bearing evidence). If nothing is genuinely related, return { links: [] }. Do NOT invent links to seem thorough.
+- Never link to a node that is not in EXISTING_NODES. Never use any "to" id you were not given.`;
