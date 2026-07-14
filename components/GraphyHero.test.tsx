@@ -77,6 +77,26 @@ const formattedBlock: GraphyBlock = {
   },
 };
 
+// A pure-non-digit placeholder ("N/A") must GAP, not chart as 0 — the parse regex
+// strips it to "" and Number("") === 0, which would fabricate a real-looking point
+// on a chart whose numbers are server-enforced traceable.
+const placeholderBlock: GraphyBlock = {
+  config: {
+    type: "line",
+    data: {
+      columns: [
+        { key: "year", label: "Year" },
+        { key: "revenue", label: "Revenue" },
+      ],
+      rows: [
+        { year: "2022", revenue: 27 },
+        { year: "2023", revenue: "N/A" },
+        { year: "2024", revenue: 130 },
+      ],
+    },
+  },
+};
+
 describe("GraphyHero", () => {
   it("renders a line config with 2 series columns and the title text", () => {
     const { container } = render(<GraphyHero block={lineBlock} width={WIDTH} />);
@@ -95,5 +115,12 @@ describe("GraphyHero", () => {
   it("parses formatted string values ($26,974) without crashing", () => {
     const { container } = render(<GraphyHero block={formattedBlock} width={WIDTH} />);
     expect(container.querySelector("svg")).toBeTruthy();
+  });
+  it("gaps a pure-non-digit placeholder cell (N/A) instead of charting 0", () => {
+    const { container } = render(<GraphyHero block={placeholderBlock} width={WIDTH} />);
+    expect(container.querySelector("svg")).toBeTruthy();
+    // One dot per real numeric point — the N/A row must not contribute a point.
+    const dots = container.querySelectorAll(".recharts-line-dots circle");
+    expect(dots).toHaveLength(2);
   });
 });

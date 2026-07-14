@@ -24,10 +24,14 @@ class GraphyBoundary extends Component<{ children: ReactNode }, { failed: boolea
 const seriesColor = (i: number) => SERIES_COLORS[i % SERIES_COLORS.length];
 
 // Series cells can arrive as formatted strings ("$26,974", "-3.1%"); strip
-// everything but digits/sign/decimal/exponent and let NaN mark a gap.
+// everything but digits/sign/decimal/exponent and let NaN mark a gap. Cells with
+// no digit at all ("N/A", "TBD") must gap too — stripping them yields "" and
+// Number("") === 0, which would fabricate a real-looking zero on a chart whose
+// numbers are server-enforced traceable.
 function parseCell(v: string | number | undefined): number {
   if (v === undefined) return NaN;
   if (typeof v === "number") return v;
+  if (!/\d/.test(String(v))) return NaN;
   return Number(String(v).replace(/[^0-9.eE-]/g, ""));
 }
 
