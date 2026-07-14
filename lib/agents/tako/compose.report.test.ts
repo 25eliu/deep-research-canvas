@@ -45,6 +45,7 @@ function ctxWithCard() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  h.hero = null;
   h.gatherFails = false;
   h.report = { verdict: "**Up.**", blocks: [{ kind: "prose", md: "Because." }] };
 });
@@ -107,7 +108,9 @@ describe("composeReport v2 — agentic gather + GPT emit", () => {
 
   it("graphyEnabled unset → no graphy field and no graphy-hero LLM call", async () => {
     h.report = { verdict: "v", blocks: [] };
+    const { generateStructured } = await import("../../llm");
     const report = await composeReport(ctxWithCard(), "how is NVDA revenue");
     expect(report?.graphy).toBeUndefined();
+    expect(generateStructured).not.toHaveBeenCalledWith(expect.objectContaining({ label: "graphy-hero" }));
   });
 });
