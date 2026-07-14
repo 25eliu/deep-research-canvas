@@ -20,6 +20,25 @@ export const zChartSpec = z.object({
   })),
 });
 
+// Graphy hero chart. `config` is the exact shape @graphysdk/core's GraphProvider
+// consumes: first column = x/category axis, remaining columns = series. Emitted by
+// a dedicated post-compose LLM call (lib/agents/tako/graphy.ts) — NEVER by the
+// report composer (see zAnswerReportEmit below). Numbers are enforced traceable to
+// this turn's fetched Tako card CSVs before this reaches the client.
+export const zGraphyColumn = z.object({ key: z.string(), label: z.string() });
+export const zGraphyConfig = z.object({
+  type: z.enum(["bar", "column", "line", "area", "pie", "donut", "scatter"]),
+  data: z.object({
+    columns: z.array(zGraphyColumn).min(2),
+    rows: z.array(z.record(z.union([z.string(), z.number()]))).min(1).max(60),
+  }),
+});
+export const zGraphyBlock = z.object({
+  title: z.string().optional(),
+  subtitle: z.string().optional(),
+  config: zGraphyConfig,
+});
+
 export const zTakoRef = z.object({
   cardId: z.string(),
   embedUrl: z.string().optional(),
@@ -102,7 +121,12 @@ export const zAnswerBlock = z.discriminatedUnion("kind", [
     })).min(1),
   }),
 ]);
-export const zAnswerReport = z.object({ verdict: z.string(), blocks: z.array(zAnswerBlock) });
+// Emit schema (what the report-composer LLM is allowed to produce) vs full report
+// (what the synthesis node carries). `graphy` is attached server-side AFTER
+// composition by composeGraphyHero — keeping it out of the emit schema means the
+// composer model can never invent a graphy block on its own.
+export const zAnswerReportEmit = z.object({ verdict: z.string(), blocks: z.array(zAnswerBlock) });
+export const zAnswerReport = zAnswerReportEmit.extend({ graphy: zGraphyBlock.optional() });
 
 export const zCanvasNode = z.object({
   id: z.string(),
@@ -154,6 +178,8 @@ export type NodeSource = z.infer<typeof zNodeSource>;
 export type ConsensusRow = z.infer<typeof zConsensusRow>;
 export type AnswerBlock = z.infer<typeof zAnswerBlock>;
 export type AnswerReport = z.infer<typeof zAnswerReport>;
+export type GraphyConfig = z.infer<typeof zGraphyConfig>;
+export type GraphyBlock = z.infer<typeof zGraphyBlock>;
 export type CanvasNode = z.infer<typeof zCanvasNode>;
 export type CanvasEdge = z.infer<typeof zCanvasEdge>;
 export type CanvasOp = z.infer<typeof zCanvasOp>;
@@ -181,6 +207,7 @@ export interface AgentRequest {
   selection?: { nodeIds: string[]; nodes: Partial<CanvasNode>[] };
   providerId: ProviderId;
   takoAnswerEnabled?: boolean;
+  graphyEnabled?: boolean; // per-turn "graphy chart" toggle → hero Graphy chart on the report
   history?: ChatTurn[];
   historySummary?: string;
 }

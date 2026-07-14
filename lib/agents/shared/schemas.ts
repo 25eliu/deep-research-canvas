@@ -4,7 +4,7 @@ import { GRAPH_ENTITY_SUBTYPES } from "./graph-subtypes";
 
 // The composed answer report lives in schema.ts (it's a canvas-node field); re-export
 // here so agent code has one import site for all agent schemas.
-export { zAnswerBlock, zAnswerReport } from "../../schema";
+export { zAnswerBlock, zAnswerReport, zAnswerReportEmit, zGraphyBlock, zGraphyConfig } from "../../schema";
 export type { AnswerBlock, AnswerReport } from "../../schema";
 
 // The board-diff body every agent returns (before sanitize/relate/consensus).
@@ -132,16 +132,3 @@ export const zGapPlan = z.object({
   })),
 });
 export type GapPlan = z.infer<typeof zGapPlan>;
-
-// Cross-links: 0-3 semantic edges from a NEW research tree's root to directly-related
-// EXISTING board nodes. `from` is always the sentinel "SELF_ROOT" (rewritten to the
-// real root id by the lane); `to` must be an existing node id (validated downstream).
-export const zCrossLinks = z.object({
-  links: z.array(z.object({
-    from: z.string(),
-    to: z.string(),
-    kind: z.enum(["supports", "contradicts"]),
-    reason: z.string(),
-  })).max(3),
-});
-export type CrossLinks = z.infer<typeof zCrossLinks>;
