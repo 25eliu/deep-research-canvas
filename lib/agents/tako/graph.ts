@@ -1,7 +1,7 @@
-// Tako graph discovery client. Base must be staging.tako.com (trytako.com is CF-blocked).
+// Tako graph discovery client. Host defaults to production tako.com; override with TAKO_HOST.
 import { startTimer, logError } from "../../log";
 
-const HOST = process.env.TAKO_HOST || "https://staging.tako.com";
+const HOST = process.env.TAKO_HOST || "https://tako.com";
 const BASE = `${HOST}/api/beta/graph`;
 const TIMEOUT_MS = 15_000;
 
@@ -56,7 +56,7 @@ export async function graphRelated(
   // `relation` is the group key: fixed ("metrics", "entities", "siblings") or a
   // named-edge key from an overview ("rel:has_team"). Replaces the deprecated
   // relation_type param (#27511).
-  opts: { relation: string; q?: string; limit?: number; label?: string },
+  opts: { relation: string; q?: string; limit?: number },
 ): Promise<GraphItem[]> {
   const p = new URLSearchParams({
     node_id: nodeId, relation: opts.relation, limit: String(opts.limit ?? 6),
@@ -66,9 +66,6 @@ export async function graphRelated(
   // is what we want as a fallback.
   const q = opts.q?.trim();
   if (q) p.set("q", q);
-  // `label` (e.g. METRIC) is a ranking boost within the relation — ranks matching-label
-  // items higher without excluding others; totals are unchanged.
-  if (opts.label) p.set("label", opts.label);
   const data = await get(`/related?${p.toString()}`);
   return Array.isArray(data?.relation?.items) ? data.relation.items : [];
 }

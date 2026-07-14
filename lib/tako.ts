@@ -1,9 +1,10 @@
 // Live Tako REST client (v3 search + v1 answer + graph via agents/tako/graph.ts).
-// IMPORTANT: host must be staging.tako.com — staging.trytako.com is Cloudflare-blocked (403).
+// Host defaults to production tako.com; override with TAKO_HOST. Get a key at
+// https://developer.tako.com — see https://docs.tako.com for the API reference.
 import type { TakoRef } from "./schema";
 import { startTimer, logError, preview, log } from "./log";
 
-const HOST = process.env.TAKO_HOST || "https://staging.tako.com";
+const HOST = process.env.TAKO_HOST || "https://tako.com";
 const BASE = `${HOST}/api`;
 const TIMEOUT_MS = 25_000;
 
@@ -139,7 +140,7 @@ export async function takoSearch(
   const effort = opts.effort || "fast";
   const web = !!opts.web;
   // sources.data = structured Tako cards; sources.web = web-grounded results.
-  // (web source shape verified against staging.tako.com during impl.)
+  // (web source shape verified against the live Tako API during impl.)
   const sources: Record<string, unknown> = { data: { count } };
   if (web) sources.web = { count };
   const t0 = Date.now();

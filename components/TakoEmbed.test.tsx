@@ -7,8 +7,8 @@ afterEach(cleanup);
 
 const tako = {
   cardId: "card_1",
-  embedUrl: "https://staging.tako.com/embed/card_1",
-  imageUrl: "https://staging.tako.com/img/card_1.png",
+  embedUrl: "https://tako.com/embed/card_1",
+  imageUrl: "https://tako.com/img/card_1.png",
 };
 
 function postResize(source: Window | null, data: unknown) {

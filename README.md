@@ -53,11 +53,11 @@ Everything runs live and **server-side — keys never touch the browser**. Fill 
 
 | Variable | Powers | Where to get it |
 |----------|--------|-----------------|
-| `TAKO_API_KEY` | Grounded, cited data cards (the `tako` provider) | [developer.staging.tako.com](https://developer.staging.tako.com) · [docs.tako.com](https://docs.tako.com) |
+| `TAKO_API_KEY` | Grounded, cited data cards (the `tako` provider) | [developer.tako.com](https://developer.tako.com) · [docs.tako.com](https://docs.tako.com) |
 | `OPENAI_API_KEY` | The `gpt` baseline | platform.openai.com |
 | `ANTHROPIC_API_KEY` | The `claude` baseline | console.anthropic.com |
 
-> Set `TAKO_HOST=https://staging.tako.com` — staging uses its own key namespace. Set
+> `TAKO_HOST` defaults to `https://tako.com` (production) — no need to set it. Set
 > `OPENAI_MODEL` / `ANTHROPIC_MODEL` to current model strings for your accounts.
 
 Run the tests with `npm test`.

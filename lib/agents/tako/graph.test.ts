@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
-// Live-verified fixture shape (staging.tako.com, 2026-07-12, NVIDIA node).
+// Live-verified fixture shape (Tako graph API, 2026-07-12, NVIDIA node).
 const DRILL_JSON = {
   node: { id: "ent::nvidia::1", name: "NVIDIA Corporation", type: "entity" },
   relation: { key: "metrics", kind: "data", label: "Related Metrics", total: 80, total_capped: false,

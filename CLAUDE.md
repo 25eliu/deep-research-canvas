@@ -1,8 +1,8 @@
 # canvas-tako — working notes for agents
 
 ## Tako API (verified 2026-07-06)
-- **Host MUST be `staging.tako.com`.** `staging.trytako.com` is Cloudflare-blocked (403 on /api/*).
-- Staging has its OWN key namespace: prod `tako.com` keys 401 on staging and vice-versa.
+- **Host defaults to production `https://tako.com`** (override via `TAKO_HOST`). Get a key at https://developer.tako.com; API reference at https://docs.tako.com.
+- Note on key namespaces: `staging.tako.com` has its OWN key namespace (a prod `tako.com` key 401s on staging and vice-versa), and `staging.trytako.com` is Cloudflare-blocked (403). Only relevant if you point `TAKO_HOST` at staging.
 - Search: `POST /api/v3/search` `{query, effort, sources:{data:{count}}}` → `{cards:[{card_id,title,embed_url,webpage_url,image_url,sources,card_type,...}]}`.
 - Answer: `POST /api/v1/answer` `{query, effort}` → `{answer, cards:[...]}` (grounded prose + citable cards).
 - Graph: `GET /api/beta/graph/search?q&types=entity|metric[&label]` → `{results:[...]}`;
@@ -12,7 +12,10 @@
   (not a filter — nothing is excluded, totals unchanged; supplying it disables label inference).
   Valid values (fixed 11-value NER enum): `PERSON, ORG, GPE, LOC, PRODUCT, EVENT, LANGUAGE, MONEY,
   METRIC, STOCK_TICKER, WEBSITE`. An out-of-enum value 400s (`Invalid label`). `subtype` still appears
-  as a RESPONSE field. The metric fan-out on `/related` passes `label=METRIC` to rank metric items up.
+  as a RESPONSE field. NOTE: `label` on `/related` is a no-op when the relation is already scoped to
+  one label (e.g. `relation=metrics&label=METRIC` boosts all items equally) — don't bother there.
+- `/v3/search` accepts `sources.data.node_ids` (≤20 resolved graph node ids) to PIN nodes into the
+  search — guaranteed retrieval candidacy + strong boost; `strict:true` returns only node_id matches.
 - Card embeds post height via a `tako::resize` postMessage — do not hard-code iframe heights.
 
 ## Providers
