@@ -132,3 +132,16 @@ export const zGapPlan = z.object({
   })),
 });
 export type GapPlan = z.infer<typeof zGapPlan>;
+
+// Cross-links: 0-3 semantic edges from a NEW research tree's root to directly-related
+// EXISTING board nodes. `from` is always the sentinel "SELF_ROOT" (rewritten to the
+// real root id by the lane); `to` must be an existing node id (validated downstream).
+export const zCrossLinks = z.object({
+  links: z.array(z.object({
+    from: z.string(),
+    to: z.string(),
+    kind: z.enum(["supports", "contradicts"]),
+    reason: z.string(),
+  })).max(3),
+});
+export type CrossLinks = z.infer<typeof zCrossLinks>;
