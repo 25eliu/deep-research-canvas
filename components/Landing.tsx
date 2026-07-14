@@ -4,10 +4,12 @@ import type { Provider } from "@/lib/sessions";
 import { ProviderSeg, TakoSwitch, GraphySwitch } from "./ProviderControls";
 import { IconSend } from "./icons";
 
+// Chart-shaped questions (time series / entity comparisons Tako has real series
+// for) — each verified live to produce a graphy hero when the toggle is on.
 const EXAMPLES = [
-  "Research the best 5 semiconductor companies to invest in",
   "Compare NVDA and AMD on revenue growth",
-  "What's driving inflation this year?",
+  "Compare US and China GDP growth since 2015",
+  "How has US inflation changed over the past decade?",
 ];
 
 export default function Landing({
