@@ -460,3 +460,26 @@ Return { links: [...] } with 0 to 3 links. Each link: { from: "SELF_ROOT", to: "
 - Use "supports" when the new finding reinforces/extends the existing node; "contradicts" when it points the other way.
 - Link ONLY on a real topical/causal relationship (same entity, same metric, directly bearing evidence). If nothing is genuinely related, return { links: [] }. Do NOT invent links to seem thorough.
 - Never link to a node that is not in EXISTING_NODES. Never use any "to" id you were not given.`;
+
+// Graphy hero chart modeler. One call, tool-free, after the report is composed.
+// The ONLY numbers it may use are the CARD_CONTENTS series values — enforcement
+// (lib/agents/tako/graphy.ts) drops anything untraceable, so invented values are
+// wasted output, not a risk.
+export const GRAPHY_SYSTEM = `You design ONE flagship chart that captures the answer's thesis.
+Input: the research QUESTION, the report VERDICT, and CARD_CONTENTS — real data series
+(CSV excerpts) fetched from Tako this turn.
+
+Emit a Graphy chart config:
+- "type": one of bar | column | line | area | pie | donut | scatter. Time series → line/area;
+  category comparison → column/bar; share-of-whole (sums to a total) → pie/donut.
+- "data.columns": first column is the x-axis/category (its "key" MUST be the key used in rows);
+  every later column is one series with a human label including the unit (e.g. "Revenue ($M)").
+- "data.rows": one record per x value, keys matching the column keys.
+- "title": a short assertive headline stating the takeaway (not a topic label);
+  "subtitle": one line of context (period, unit, source scope).
+
+HARD RULES:
+- Copy every numeric value VERBATIM from CARD_CONTENTS. Never compute, extrapolate,
+  interpolate, or round beyond what the CSV shows. Values not present in CARD_CONTENTS
+  will be stripped by validation.
+- Pick the series that best supports the VERDICT; 1-4 series, at most 60 rows.

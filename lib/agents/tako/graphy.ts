@@ -9,6 +9,11 @@
 // didn't return this turn.
 import type { AnswerBlock, GraphyBlock, GraphyConfig } from "../../schema";
 import { traceable } from "./compose";
+import { generateStructured } from "../../llm";
+import { zGraphyBlock } from "../shared/schemas";
+import { GRAPHY_SYSTEM } from "./prompts";
+import { log } from "../../log";
+import type { ResearchCtx } from "./flow";
 
 const MAX_ROWS = 60; // keep the node card light
 
@@ -82,4 +87,43 @@ export function fallbackGraphyBlock(blocks: AnswerBlock[]): GraphyBlock | null {
     }
   }
   return null;
+}
+
+// Same model family as the report emit (compose.ts deepModel) — chart modeling is
+// part of the synthesis tail; effort stays low, the input is a small digest.
+const heroModel = () => process.env.SYNTH_MODEL || "gpt-5.4";
+
+// Model ONE hero Graphy chart from this turn's fetched card CSVs. Failure is never
+// user-facing: LLM error, schema mismatch, or accuracy-validation discard all fall
+// back to converting the report's first (already validated) chart/comparison block;
+// with no convertible block the report simply ships without a hero.
+export async function composeGraphyHero(
+  ctx: ResearchCtx, question: string, verdict: string, blocks: AnswerBlock[],
+  cardContents: { cardId: string; title?: string; data: string }[],
+  allowed: Allowed,
+): Promise<GraphyBlock | null> {
+  if (cardContents.length > 0) {
+    try {
+      const hero = await generateStructured({
+        provider: "openai", model: heroModel(), reasoningEffort: "low",
+        system: GRAPHY_SYSTEM,
+        prompt: `QUESTION: ${question}\n\nVERDICT: ${verdict}\n\nCARD_CONTENTS: ${JSON.stringify(cardContents)}`,
+        schema: zGraphyBlock, label: "graphy-hero",
+      });
+      let dropped = 0;
+      const config = enforceTraceable(hero.config, allowed, () => { dropped++; });
+      if (config) {
+        if (dropped > 0) log("tako", "graphy-hero pruned untraceable cells", { dropped });
+        return { ...hero, config };
+      }
+      ctx.notes.push(`graphy hero discarded — ${dropped} untraceable values, using fallback`);
+    } catch (e: unknown) {
+      ctx.notes.push(`graphy hero failed — ${e instanceof Error ? e.message : String(e)}`);
+    }
+  } else {
+    ctx.notes.push("graphy hero skipped — no card contents fetched this turn");
+  }
+  const fallback = fallbackGraphyBlock(blocks);
+  if (!fallback) log("tako", "graphy hero unavailable — no convertible block");
+  return fallback;
 }

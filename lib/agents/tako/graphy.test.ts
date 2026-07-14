@@ -1,4 +1,22 @@
 // lib/agents/tako/graphy.test.ts
+import { vi } from "vitest";
+const h = vi.hoisted(() => ({
+  hero: null as unknown, // what the mocked graphy-hero LLM call returns
+  heroFails: false,
+}));
+vi.mock("../../llm", () => ({
+  generateStructured: vi.fn(async (opts: { label: string }) => {
+    if (opts.label === "graphy-hero") {
+      if (h.heroFails) throw new Error("model down");
+      return h.hero;
+    }
+    return {};
+  }),
+  // compose.ts (imported for allowedSets/traceable) also pulls this from ../../llm —
+  // the factory must provide it or the import binding is undefined.
+  generateWithTools: vi.fn(async () => ({ text: "", steps: 0 })),
+}));
+
 import { describe, it, expect } from "vitest";
 import { zGraphyConfig, zAnswerReportEmit, zAnswerReport } from "../../schema";
 
@@ -148,5 +166,75 @@ describe("fallbackGraphyBlock — first chart/comparison block wins", () => {
 
   it("returns null when no convertible block exists", () => {
     expect(fallbackGraphyBlock([{ kind: "prose", md: "hi" }])).toBeNull();
+  });
+});
+
+import { composeGraphyHero } from "./graphy";
+import { newResearchCtx } from "./research";
+import { FindingLedger } from "./findings";
+import type { AgentRequest } from "../../schema";
+
+function heroCtx() {
+  const req: AgentRequest = {
+    canvasId: "c", message: "compare NVDA and AMD revenue", surface: "main",
+    canvasState: { nodes: [], edges: [] }, providerId: "tako",
+    takoAnswerEnabled: true, graphyEnabled: true, history: [],
+  };
+  return newResearchCtx(req, new FindingLedger(), () => {});
+}
+
+const CARD_CONTENTS = [{ cardId: "nvda", title: "NVDA Revenue", data: "Year,Revenue\n2023,26974\n2024,60922" }];
+const GOOD_HERO = {
+  title: "NVDA revenue surge",
+  config: {
+    type: "column",
+    data: {
+      columns: [{ key: "x", label: "Year" }, { key: "s0", label: "Revenue ($M)" }],
+      rows: [{ x: "2023", s0: 26974 }, { x: "2024", s0: 60922 }],
+    },
+  },
+};
+const CHART_BLOCK: AnswerBlock = {
+  kind: "chart", title: "Revenue",
+  chartSpec: { kind: "bar", series: [{ label: "NVDA", points: [{ x: "2023", y: 26974 }, { x: "2024", y: 60922 }] }] },
+};
+
+describe("composeGraphyHero", () => {
+  it("returns the LLM-modeled block when every number traces to card contents", async () => {
+    h.heroFails = false; h.hero = GOOD_HERO;
+    const out = await composeGraphyHero(heroCtx(), "q", "verdict", [], CARD_CONTENTS, ALLOWED);
+    expect(out?.title).toBe("NVDA revenue surge");
+    expect(out?.config.data.rows).toHaveLength(2);
+  });
+
+  it("falls back to the report's chart block when the modeled numbers are untraceable", async () => {
+    h.heroFails = false;
+    h.hero = { ...GOOD_HERO, config: { ...GOOD_HERO.config, data: { ...GOOD_HERO.config.data, rows: [{ x: "2023", s0: 111 }, { x: "2024", s0: 222 }] } } };
+    const ctx = heroCtx();
+    const out = await composeGraphyHero(ctx, "q", "verdict", [CHART_BLOCK], CARD_CONTENTS, ALLOWED);
+    expect(out?.config.type).toBe("column"); // converted bar chartSpec, not the fabricated config
+    expect(out?.config.data.rows).toEqual([{ x: "2023", s0: 26974 }, { x: "2024", s0: 60922 }]);
+    expect(ctx.notes.some((n) => n.includes("graphy"))).toBe(true);
+  });
+
+  it("falls back when the LLM call throws", async () => {
+    h.heroFails = true;
+    const out = await composeGraphyHero(heroCtx(), "q", "verdict", [CHART_BLOCK], CARD_CONTENTS, ALLOWED);
+    expect(out?.config.data.rows).toHaveLength(2);
+  });
+
+  it("returns null (silent degradation) when the LLM fails and no convertible block exists", async () => {
+    h.heroFails = true;
+    const out = await composeGraphyHero(heroCtx(), "q", "verdict", [{ kind: "prose", md: "p" }], CARD_CONTENTS, ALLOWED);
+    expect(out).toBeNull();
+  });
+
+  it("skips the LLM entirely when there are no card contents (straight to fallback)", async () => {
+    h.heroFails = false; h.hero = GOOD_HERO;
+    const { generateStructured } = await import("../../llm");
+    (generateStructured as ReturnType<typeof vi.fn>).mockClear();
+    const out = await composeGraphyHero(heroCtx(), "q", "verdict", [CHART_BLOCK], [], ALLOWED);
+    expect(generateStructured).not.toHaveBeenCalled();
+    expect(out?.config.data.rows).toHaveLength(2);
   });
 });
