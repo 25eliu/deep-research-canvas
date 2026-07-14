@@ -12,7 +12,7 @@ import Sidebar from "@/components/Sidebar";
 import Landing from "@/components/Landing";
 import ChatPanel from "@/components/ChatPanel";
 import CanvasScene from "@/components/CanvasScene";
-import { ProviderSeg, TakoSwitch } from "@/components/ProviderControls";
+import { ProviderSeg, TakoSwitch, GraphySwitch } from "@/components/ProviderControls";
 import { IconSidebar, IconPlus, IconMinus, IconFit } from "@/components/icons";
 
 export default function Page() {
@@ -101,7 +101,7 @@ export default function Page() {
           canvasId: snap.id, message: text, surface,
           canvasState: snap.state,
           selection: { nodeIds: selection, nodes: selection.map((id) => nodeById[id]).filter(Boolean) },
-          providerId: snap.provider, takoAnswerEnabled: snap.takoAnswer,
+          providerId: snap.provider, takoAnswerEnabled: snap.takoAnswer, graphyEnabled: snap.graphy,
           history: buildHistory(snap), historySummary: snap.summary,
         }),
       });
@@ -677,6 +677,7 @@ export default function Page() {
             <span className="spacer" />
             <ProviderSeg provider={active.provider} onChange={(p: Provider) => patchActive((s) => ({ ...s, provider: p }))} />
             <TakoSwitch checked={active.takoAnswer} onChange={(v) => patchActive((s) => ({ ...s, takoAnswer: v }))} />
+            <GraphySwitch checked={!!active.graphy} onChange={(v) => patchActive((s) => ({ ...s, graphy: v }))} />
           </div>
         )}
       </div>
@@ -688,6 +689,8 @@ export default function Page() {
         setProvider={(p) => patchActive((s) => ({ ...s, provider: p }))}
         takoAnswer={active.takoAnswer}
         setTakoAnswer={(v) => patchActive((s) => ({ ...s, takoAnswer: v }))}
+        graphy={!!active.graphy}
+        setGraphy={(v) => patchActive((s) => ({ ...s, graphy: v }))}
         onSend={(t) => send("main", t)}
         loading={loading}
       />

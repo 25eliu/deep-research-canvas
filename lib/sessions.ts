@@ -33,6 +33,7 @@ export interface Session {
   messages: ChatMsg[];
   provider: Provider;
   takoAnswer: boolean;
+  graphy: boolean; // per-turn hero Graphy chart on the synthesis report
   view: CanvasView;
   summary?: string;
   summaryUpToId?: string;
@@ -54,6 +55,7 @@ export function newSession(): Session {
     messages: [],
     provider: "tako",
     takoAnswer: false,
+    graphy: false,
     view: { x: 0, y: 0, scale: 1 },
   };
 }

@@ -1,7 +1,7 @@
 "use client";
 import { useState } from "react";
 import type { Provider } from "@/lib/sessions";
-import { ProviderSeg, TakoSwitch } from "./ProviderControls";
+import { ProviderSeg, TakoSwitch, GraphySwitch } from "./ProviderControls";
 import { IconSend } from "./icons";
 
 const EXAMPLES = [
@@ -11,13 +11,15 @@ const EXAMPLES = [
 ];
 
 export default function Landing({
-  hidden, provider, setProvider, takoAnswer, setTakoAnswer, onSend, loading,
+  hidden, provider, setProvider, takoAnswer, setTakoAnswer, graphy, setGraphy, onSend, loading,
 }: {
   hidden: boolean;
   provider: Provider;
   setProvider: (p: Provider) => void;
   takoAnswer: boolean;
   setTakoAnswer: (v: boolean) => void;
+  graphy: boolean;
+  setGraphy: (v: boolean) => void;
   onSend: (text: string) => void;
   loading: boolean;
 }) {
@@ -56,6 +58,7 @@ export default function Landing({
         <div className="landing-controls">
           <ProviderSeg provider={provider} onChange={setProvider} />
           <TakoSwitch checked={takoAnswer} onChange={setTakoAnswer} />
+          <GraphySwitch checked={graphy} onChange={setGraphy} />
         </div>
 
         <div className="examples">

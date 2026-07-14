@@ -45,3 +45,18 @@ export function TakoSwitch({
     </label>
   );
 }
+
+export function GraphySwitch({
+  checked, onChange,
+}: {
+  checked: boolean;
+  onChange: (v: boolean) => void;
+}) {
+  return (
+    <label className="switch">
+      <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} />
+      <span className="track" />
+      graphy chart
+    </label>
+  );
+}

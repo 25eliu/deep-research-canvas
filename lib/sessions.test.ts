@@ -5,7 +5,7 @@ import type { Session } from "./sessions";
 function session(over: Partial<Session> = {}): Session {
   return {
     id: "s1", title: "t", createdAt: 0, state: { nodes: [], edges: [] },
-    messages: [], provider: "tako", takoAnswer: false, view: { x: 0, y: 0, scale: 1 },
+    messages: [], provider: "tako", takoAnswer: false, graphy: false, view: { x: 0, y: 0, scale: 1 },
     ...over,
   };
 }
