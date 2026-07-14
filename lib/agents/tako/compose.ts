@@ -8,12 +8,13 @@
 // Every number is validated against the gathered figures + the FULL per-turn CSV
 // cache (not just what Phase A re-read) — anything untraceable is dropped and
 // logged, so the report never shows a hallucinated value.
-import type { AnswerReport, AnswerBlock } from "../../schema";
+import type { AnswerReport, AnswerBlock, GraphyBlock } from "../../schema";
 import type { TakoCallRecord } from "../shared/types";
 import { generateStructured, generateWithTools } from "../../llm";
 import { tool } from "ai";
 import { z } from "zod";
-import { zAnswerReport } from "../shared/schemas";
+import { zAnswerReportEmit } from "../shared/schemas";
+import { composeGraphyHero } from "./graphy";
 import { REPORT_SYSTEM, REPORT_GATHER_SYSTEM } from "./prompts";
 import { log } from "../../log";
 import { fetchContents, excerptCsv, type ResearchCtx, type GatheredFigure } from "./flow";
@@ -288,11 +289,11 @@ export async function composeReport(ctx: ResearchCtx, question: string): Promise
 
   const prompt = `${ctx.ctxText}\n\nQUESTION: ${question}\n\nSUB_ANSWERS: ${JSON.stringify(subAnswers)}\n\nFIGURES: ${JSON.stringify(figures)}\n\nWEB_SOURCES: ${JSON.stringify(webSources)}\n\nCARD_CONTENTS: ${JSON.stringify(cardContents)}\n\nANALYST_NOTES: ${analystNotes || "(none)"}`;
 
-  let report: AnswerReport;
+  let report: z.infer<typeof zAnswerReportEmit>;
   try {
     report = await generateStructured({
       provider: "openai", model: deepModel(), reasoningEffort: "medium",
-      system: REPORT_SYSTEM, prompt, schema: zAnswerReport, label: "answer-report",
+      system: REPORT_SYSTEM, prompt, schema: zAnswerReportEmit, label: "answer-report",
     });
   } catch (e: unknown) {
     ctx.notes.push(`answer-report failed — ${errorMessage(e)}`);
@@ -319,5 +320,11 @@ export async function composeReport(ctx: ResearchCtx, question: string): Promise
     .map((b) => validateBlock(b, allowed, () => { dropped++; }))
     .filter((b): b is AnswerBlock => b !== null);
   if (dropped > 0) log("tako", "answer-report dropped untraceable numbers", { dropped });
-  return { verdict: report.verdict, blocks };
+  // Graphy hero: modeled AFTER validation so it can reuse `allowed` (the full
+  // figure + CSV-cache set) and the already-validated `blocks` for its fallback.
+  let graphy: GraphyBlock | null = null;
+  if (ctx.req.graphyEnabled) {
+    graphy = await composeGraphyHero(ctx, question, report.verdict, blocks, cardContents, allowed);
+  }
+  return { verdict: report.verdict, blocks, ...(graphy ? { graphy } : {}) };
 }

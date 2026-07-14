@@ -20,6 +20,7 @@ export async function POST(req: Request) {
     selection: body.selection,
     providerId: body.providerId || "tako",
     takoAnswerEnabled: body.takoAnswerEnabled ?? true,
+    graphyEnabled: body.graphyEnabled ?? false,
     history: body.history ?? [],
     historySummary: body.historySummary,
   };
@@ -30,6 +31,7 @@ export async function POST(req: Request) {
     provider: request.providerId,
     nodes: request.canvasState.nodes.length,
     takoAnswer: request.takoAnswerEnabled,
+    graphy: request.graphyEnabled,
     message: request.message,
   });
 

@@ -3,6 +3,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 
 const h = vi.hoisted(() => ({
   report: {} as any,
+  hero: null as any,
   gatherFails: false,
   csv: "Timestamp,Revenue\n2023,26974\n2024,60922",
 }));
@@ -10,6 +11,7 @@ const h = vi.hoisted(() => ({
 vi.mock("../../llm", () => ({
   generateStructured: vi.fn(async (opts: any) => {
     if (opts.label === "answer-report") return h.report;
+    if (opts.label === "graphy-hero") return h.hero;
     return {};
   }),
   generateWithTools: vi.fn(async (opts: any) => {
@@ -83,5 +85,29 @@ describe("composeReport v2 — agentic gather + GPT emit", () => {
     const ctx = ctxWithCard();
     const report = await composeReport(ctx, "q");
     expect(report).toBeNull();
+  });
+
+  it("graphyEnabled:true attaches a validated graphy hero to the report", async () => {
+    h.report = { verdict: "NVDA leads", blocks: [] };
+    h.hero = {
+      title: "Revenue doubles",
+      config: {
+        type: "column",
+        data: {
+          columns: [{ key: "x", label: "Year" }, { key: "s0", label: "Revenue" }],
+          rows: [{ x: "2023", s0: 26974 }, { x: "2024", s0: 60922 }],
+        },
+      },
+    };
+    const ctx = ctxWithCard();
+    ctx.req.graphyEnabled = true;
+    const report = await composeReport(ctx, "how is NVDA revenue");
+    expect(report?.graphy?.title).toBe("Revenue doubles");
+  });
+
+  it("graphyEnabled unset → no graphy field and no graphy-hero LLM call", async () => {
+    h.report = { verdict: "v", blocks: [] };
+    const report = await composeReport(ctxWithCard(), "how is NVDA revenue");
+    expect(report?.graphy).toBeUndefined();
   });
 });
