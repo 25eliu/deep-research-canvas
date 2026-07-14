@@ -78,7 +78,7 @@ export function allowedSets(figures: GatheredFigure[]): { strings: Set<string>; 
 
 // A value cell is traceable if it has no number (pure text) OR its number matches
 // a gathered figure (by normalized string or by magnitude within 0.5%).
-function traceable(value: string, allowed: { strings: Set<string>; mags: number[] }): boolean {
+export function traceable(value: string, allowed: { strings: Set<string>; mags: number[] }): boolean {
   const mag = numericMagnitude(value);
   if (mag === null) return true; // pure text label
   const norm = value.replace(/\s+/g, "").toLowerCase();
