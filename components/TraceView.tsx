@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useId, useState } from "react";
-import { traceToDisplay, stepsToDisplay, countCalls, groundedInOf, type TurnTrace, type LiveStep } from "@/lib/trace";
+import { traceToDisplay, stepsToDisplay, countCalls, groundedInOf, type TurnTrace, type LiveStep, type GraphyTraceInfo } from "@/lib/trace";
 import { IconChevronRight } from "./icons";
 import TraceNode from "./TraceNode";
 
@@ -59,6 +59,10 @@ export default function TraceView({
   const resolved = trace?.graph?.resolved.length ?? 0;
   const findings = (trace?.tree ?? []).reduce((n, node) => n + (node.findingCount ?? 0), 0);
   const notes = trace?.notes ?? [];
+  // Graphy hero provenance: authoritative from the finalized trace, else the live
+  // streamed outcome (the last graphy step wins — there is at most one per turn).
+  const graphy: GraphyTraceInfo | undefined =
+    trace?.graphy ?? [...(steps ?? [])].reverse().find((s): s is Extract<LiveStep, { t: "graphy" }> => s.t === "graphy")?.info;
 
   return (
     <div className="turn-trace">
@@ -84,6 +88,27 @@ export default function TraceView({
               <TraceNode node={node} />
             </div>
           ))}
+          {graphy && (
+            <div className="graphy-trace">
+              <span className={`graphy-trace-badge ${graphy.outcome}`}>Graphy</span>
+              {graphy.outcome === "modeled" && (
+                <span className="graphy-trace-text">
+                  hero chart modeled from card data · {graphy.series ?? "?"} series × {graphy.rows ?? "?"} rows
+                  {graphy.dropped ? ` · ${graphy.dropped} untraceable cell${graphy.dropped === 1 ? "" : "s"} pruned` : ""}
+                  {` · ${(graphy.ms / 1000).toFixed(1)}s`}
+                </span>
+              )}
+              {graphy.outcome === "fallback" && (
+                <span className="graphy-trace-text">
+                  modeling unavailable — converted the report&rsquo;s own chart
+                  {graphy.dropped ? ` (${graphy.dropped} untraceable cells forced the discard)` : ""}
+                </span>
+              )}
+              {graphy.outcome === "none" && (
+                <span className="graphy-trace-text">no chartable series this turn — report shipped without a hero chart</span>
+              )}
+            </div>
+          )}
           {hasGrounded && (
             <div className="grounded-in">
               <div className="grounded-in-label">Grounded in</div>

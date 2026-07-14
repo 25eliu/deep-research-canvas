@@ -1,6 +1,6 @@
 // Reusable leaf research flow: strategy → queries → searches → card noding → CSV contents → figures → mini-synthesis. Called by the research tree (research.ts) and the gap-fill round (gaps.ts).
 import type { AgentRequest, CanvasOp, CanvasNode } from "../../schema";
-import type { EmitFn, TraceTreeNode, TakoCallRecord, GraphCallRecord } from "../shared/types";
+import type { EmitFn, TraceTreeNode, TakoCallRecord, GraphCallRecord, GraphyTraceInfo } from "../shared/types";
 import { generateStructured, streamAnswer } from "../../llm";
 import { ctxBlock } from "../shared/ctx";
 import { zWebFilter, type GraphLookup } from "../shared/schemas";
@@ -41,11 +41,6 @@ export function feedsEdge(from: string, to: string): CanvasOp {
 }
 export function derivedEdge(from: string, to: string): CanvasOp {
   return { op: "add_edge", edge: { id: `derives:${from}->${to}`, from, to, kind: "derived_from" } };
-}
-// Web-source → the node that used it. `supports` keeps them out of the finding grid
-// (they render in the left "Web sources" column) while still drawing a provenance line.
-export function supportsEdge(from: string, to: string): CanvasOp {
-  return { op: "add_edge", edge: { id: `supports:${from}->${to}`, from, to, kind: "supports" } };
 }
 
 export interface WebSource { title: string; source?: string; url?: string; summary?: string; content?: string }
@@ -186,6 +181,7 @@ export interface ResearchCtx {
   figures: GatheredFigure[]; // every real number gathered this turn — the answer report validates against this
   branchResults: { question: string; claim: string; confidence: number; figures: GatheredFigure[] }[];
   answerGrounded: boolean; // the root decompose was actually grounded by a /v1/answer (→ trace.answerUsed)
+  graphyTrace?: GraphyTraceInfo; // graphy hero outcome, set by composeGraphyHero (→ trace.graphy)
   // Flat authoritative accumulators — every Tako call and every reasoning step,
   // INCLUDING those on nodes that were later pruned (0-finding leaves). The tree
   // holds per-node copies for drill-down; these guarantee nothing is lost.
@@ -383,18 +379,15 @@ export async function runSearches(
         for (const c of cards) {
           const f = ctx.ledger.add(c, nodeId);
           if (!f) {
-            // Dedup hit: a prior branch already has this card. For a data card, reuse the ONE
-            // node with a `supports` link to THIS branch and include it in findings so this
-            // branch's synthesis still reasons over it. For a web source (no node), just route
-            // it to this branch's candidates so it still counts toward THIS answer's sources.
+            // Dedup hit: a prior branch already has this card. For a data card, reuse the
+            // existing node's finding so THIS branch's synthesis still reasons over it —
+            // but draw NO edge: the card stays connected only to its original parent
+            // (cross-branch lines read as noise on the board). For a web source (no node),
+            // route it to this branch's candidates so it still counts toward the sources.
             const existing = ctx.ledger.lookup(c);
             if (existing && existing.nodeId !== nodeId) {
-              if (existing.kind === "data_card") {
-                ctx.push([supportsEdge(existing.nodeId, nodeId)]);
-                dataFindings.push(existing);
-              } else {
-                webCandidates.push(existing);
-              }
+              if (existing.kind === "data_card") dataFindings.push(existing);
+              else webCandidates.push(existing);
             }
             continue;
           }

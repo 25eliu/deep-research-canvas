@@ -6,9 +6,9 @@
 // Depends only on the shared wire types (pure interfaces — safe in the client
 // bundle). sessions.ts imports FROM here; this file imports nothing from there,
 // so there is no import cycle.
-import type { TurnTrace, TraceTreeNode, TakoCallRecord, GraphCallRecord } from "./agents/shared/types";
+import type { TurnTrace, TraceTreeNode, TakoCallRecord, GraphCallRecord, GraphyTraceInfo } from "./agents/shared/types";
 
-export type { TurnTrace, TraceTreeNode, TakoCallRecord, GraphCallRecord };
+export type { TurnTrace, TraceTreeNode, TakoCallRecord, GraphCallRecord, GraphyTraceInfo };
 
 export type Grounding = "tako" | "model" | "web";
 
@@ -37,6 +37,8 @@ export interface TraceNodeView {
   calls: TakoCallRecord[];
   graphCalls: GraphCallRecord[]; // raw graph API calls (params + response) for drill-down
   graphMs?: number; // wall-clock of the node's graph phase
+  totalMs?: number; // wall-clock of the node as a whole (branches span their subtree; synth spans the run)
+  composeMs?: number; // synth node only: final composition (gather + report) wall-clock
   children: TraceNodeView[];
   synthesizing?: boolean; // live only: synthesis in progress for this node
   gapFill?: boolean;
@@ -47,7 +49,8 @@ export type LiveStep =
   | { t: "reasoning"; nodeId: string; depth: number; question: string; kind: "branch" | "leaf" | "gap"; rationale?: string; entities?: string[]; subtype?: string; metrics?: string[]; subQuestions?: string[] }
   | { t: "tako"; call: TakoCallRecord }
   | { t: "graph"; nodeId: string; call: GraphCallRecord }
-  | { t: "synth"; nodeId: string; phase: "start" | "end" };
+  | { t: "synth"; nodeId: string; phase: "start" | "end" }
+  | { t: "graphy"; info: GraphyTraceInfo };
 
 // Classify where a card came from, for the grounding dot. Trace cards always come
 // from a Tako call; a card with a real source reads as Tako-grounded (emerald),
@@ -97,6 +100,8 @@ export function buildTree(flat: TraceTreeNode[] | undefined): TraceNodeView[] {
     calls: n.calls ?? [],
     graphCalls: n.graphCalls ?? [],
     graphMs: n.graphMs,
+    totalMs: n.totalMs,
+    composeMs: n.composeMs,
     children: n.children.map((id) => byId.get(id)).filter(Boolean).map((c) => toView(c!)),
     gapFill: n.gapFill,
   });
@@ -162,7 +167,8 @@ export function traceToDisplay(trace: TurnTrace): TraceNodeView[] {
   return stepsToDisplay(steps);
 }
 
-// Count every Tako call across a (possibly nested) trace for the header/footer.
+// Count every Tako call across a (possibly nested) trace for the header/footer —
+// contents fetches (network AND cache reads) count like any other call.
 export function countCalls(trace: TurnTrace | undefined): number {
   if (!trace) return 0;
   if (trace.calls?.length) return trace.calls.length;

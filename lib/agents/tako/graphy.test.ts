@@ -237,4 +237,34 @@ describe("composeGraphyHero", () => {
     expect(generateStructured).not.toHaveBeenCalled();
     expect(out?.config.data.rows).toHaveLength(2);
   });
+
+  // Provenance: the shipped block is stamped with how it was produced, the ctx
+  // carries the trace info the pipeline persists, and a live "graphy" event streams
+  // the same outcome to the chat UI.
+  it("modeled: stamps source, sets ctx.graphyTrace, emits a graphy event", async () => {
+    h.heroFails = false; h.hero = GOOD_HERO;
+    const ctx = heroCtx();
+    const events: { type: string; info?: { outcome: string } }[] = [];
+    ctx.emit = (e) => events.push(e as (typeof events)[number]);
+    const out = await composeGraphyHero(ctx, "q", "verdict", [], CARD_CONTENTS, ALLOWED);
+    expect(out?.source).toBe("modeled");
+    expect(ctx.graphyTrace).toMatchObject({ outcome: "modeled", series: 1, rows: 2 });
+    expect(events.find((e) => e.type === "graphy")?.info?.outcome).toBe("modeled");
+  });
+
+  it("fallback: stamps source and traces outcome when the LLM fails", async () => {
+    h.heroFails = true;
+    const ctx = heroCtx();
+    const out = await composeGraphyHero(ctx, "q", "verdict", [CHART_BLOCK], CARD_CONTENTS, ALLOWED);
+    expect(out?.source).toBe("fallback");
+    expect(ctx.graphyTrace?.outcome).toBe("fallback");
+  });
+
+  it("none: traces the no-hero outcome so the UI can say so", async () => {
+    h.heroFails = true;
+    const ctx = heroCtx();
+    const out = await composeGraphyHero(ctx, "q", "verdict", [{ kind: "prose", md: "p" }], CARD_CONTENTS, ALLOWED);
+    expect(out).toBeNull();
+    expect(ctx.graphyTrace?.outcome).toBe("none");
+  });
 });

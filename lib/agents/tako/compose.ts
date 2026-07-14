@@ -1,16 +1,16 @@
-// Final answer layer, two phases. Phase A (fast model): a tool loop that sees only
-// CATALOGS — card titles/descriptions and web-source snippets, no raw data inlined —
-// and READS just the series/page content the report will need (get_card_contents /
-// get_web_content; cached series are instant, uncached fetches budgeted). Phase B
-// (deep model): composes a multi-block "answer report" (verdict + comparison/
-// leaderboard/sections/timeline/tiles/table/chart/prose) from the branch results,
-// gathered figures, web snippets, and ONLY the card contents Phase A chose to read.
-// Every number is validated against the gathered figures + the FULL per-turn CSV
-// cache (not just what Phase A re-read) — anything untraceable is dropped and
-// logged, so the report never shows a hallucinated value.
+// Final answer layer. Gather is DETERMINISTIC: the CSVs the leaves already pulled
+// this turn are served straight from the per-turn cache into CARD_CONTENTS — no LLM
+// in the loop. Only when NOTHING is cached (but data cards exist) does a fallback
+// tool loop (fast model, get_card_contents / get_web_content, budgeted fetches) run.
+// The emit (deep model, low reasoning effort by default) composes a PROSE-FIRST
+// "answer report" (verdict + insight prose; numeric blocks only when every value is
+// backed by evidence). Every number is validated against the gathered figures + the
+// FULL per-turn CSV cache — untraceable numbers are PRUNED (dead table columns/rows
+// dropped, value-less leaderboards converted to prose rosters, degenerate charts
+// removed) and logged, so the report never shows a hallucinated value or a "—" cell.
 import type { AnswerReport, AnswerBlock, GraphyBlock } from "../../schema";
 import type { TakoCallRecord } from "../shared/types";
-import { generateStructured, generateWithTools } from "../../llm";
+import { generateStructured, generateWithTools, type ReasoningEffort } from "../../llm";
 import { tool } from "ai";
 import { z } from "zod";
 import { zAnswerReportEmit } from "../shared/schemas";
@@ -20,10 +20,20 @@ import { log } from "../../log";
 import { fetchContents, excerptCsv, type ResearchCtx, type GatheredFigure } from "./flow";
 
 const deepModel = () => process.env.SYNTH_MODEL || "gpt-5.4";
-const COMPOSER_CONTENTS_BUDGET = 4; // extra fetch headroom for the gather phase (cache hits are free)
-const COMPOSER_MAX_STEPS = 6;
-const COMPOSER_CSV_EXCERPT = 2400; // larger than leaf excerpts — the composer charts real series
-const COMPOSER_CSV_ROWS = 60;
+// Low by default: the emit is the latency tail, and the report is prose-first now —
+// deep reconciliation can be bought back per-deploy via SYNTH_REASONING_EFFORT.
+const synthEffort = (): ReasoningEffort =>
+  (process.env.SYNTH_REASONING_EFFORT as ReasoningEffort) || "low";
+const COMPOSER_CONTENTS_BUDGET = 3; // extra fetch headroom for the fallback gather (cache hits are free)
+const COMPOSER_MAX_STEPS = 4;
+const COMPOSER_CSV_EXCERPT = 1600; // larger than leaf excerpts — the composer charts real series
+const COMPOSER_CSV_ROWS = 32;
+// Phase B prompt bounds: the report emit is the latency tail, and its time scales with
+// input size — the emit reads a cumulative digest, never the whole evidence corpus.
+const FIGURES_PROMPT_CAP = 40; // deduped figures beyond the sub-answers' own keyFigures
+const WEB_PROMPT_CAP = 10; // web snippets (full text stayed behind the gather tool)
+const WEB_SNIPPET_CAP = 240;
+const CARD_CONTENTS_PROMPT_CAP = 8; // series excerpts handed to the emit (gather may read more; validation sees all)
 const WEB_TOOL_CONTENT_CAP = 3000; // full-page excerpt served by get_web_content (already in memory)
 
 function errorMessage(e: unknown): string {
@@ -101,8 +111,29 @@ export function validateBlock(block: AnswerBlock, allowed: { strings: Set<string
       return tiles.length ? { ...block, tiles } : null;
     }
     case "table": {
-      const rows = block.rows.map((row) => row.map((cell) => (traceable(cell, allowed) ? cell : (drop(`table cell "${cell}"`), "—"))));
-      return { ...block, rows };
+      // Prune, don't blank: dead value columns and dead rows disappear entirely, and a
+      // table that lost most of its numbers is dropped — a grid of "—" placeholders is
+      // worse than no table (the Tako embeds on the canvas already carry the data).
+      const bad = block.rows.map((row) => row.map((cell, c) => c > 0 && !traceable(cell, allowed)));
+      let numericCount = 0, badCount = 0;
+      block.rows.forEach((row, r) => row.forEach((cell, c) => {
+        if (c === 0) return;
+        if (numericMagnitude(cell) !== null) numericCount++;
+        if (bad[r][c]) badCount++;
+      }));
+      if (badCount === 0) return block;
+      drop(`table "${block.columns.join(",")}" — ${badCount}/${numericCount} numeric cells untraceable`);
+      if (badCount * 2 > numericCount) return null;
+      const keepCol = block.columns.map((_, c) => c === 0 || block.rows.some((_, r) => !bad[r][c]));
+      const keepRow = block.rows.map((row, r) => row.some((_, c) => c > 0 && keepCol[c] && !bad[r][c]));
+      const columns = block.columns.filter((_, c) => keepCol[c]);
+      const rows = block.rows
+        .map((row, r) => ({ row, r }))
+        .filter(({ r }) => keepRow[r])
+        // Isolated stragglers (live row × live column, untraceable cell) still blank.
+        .map(({ row, r }) => row.map((cell, c) => (bad[r][c] ? "—" : cell)).filter((_, c) => keepCol[c]));
+      if (columns.length < 2 || rows.length === 0) return null;
+      return { ...block, columns, rows };
     }
     case "chart": {
       const series = block.chartSpec.series
@@ -112,7 +143,9 @@ export function validateBlock(block: AnswerBlock, allowed: { strings: Set<string
           return ok;
         }) }))
         .filter((s) => s.points.length > 0);
-      return series.length ? { ...block, chartSpec: { ...block.chartSpec, series } } : null;
+      // A chart with fewer than 2 surviving points adds nothing over prose — drop it.
+      if (series.reduce((n, s) => n + s.points.length, 0) < 2) return null;
+      return { ...block, chartSpec: { ...block.chartSpec, series } };
     }
     case "comparison": {
       const series = block.series
@@ -122,23 +155,45 @@ export function validateBlock(block: AnswerBlock, allowed: { strings: Set<string
           return ok;
         }) }))
         .filter((s) => s.points.length > 0);
-      return series.length ? { ...block, series } : null;
+      // Same degenerate-block rule as "chart": under 2 surviving points isn't a comparison.
+      if (series.reduce((n, s) => n + s.points.length, 0) < 2) return null;
+      return { ...block, series };
     }
     case "leaderboard": {
-      const rows = block.rows
-        .filter((r) => {
-          const ok = traceable(r.value, allowed);
-          if (!ok) drop(`leaderboard row "${r.entity}: ${r.value}"`);
+      // The ranked roster IS the block's substance — dropping a row breaks the ranking
+      // (a "top 5" rendering as one orphaned row). A minority of untraceable values
+      // blanks to "—" (ranks stay intact); when MOST values are unverifiable — common
+      // for private-company financials Tako can't fetch — the whole board would be
+      // dashes, so the roster converts to a prose ranked list instead (traceable
+      // values kept inline, unverifiable ones simply omitted).
+      const okValues = block.rows.map((r) => {
+        const ok = traceable(r.value, allowed);
+        if (!ok) drop(`leaderboard value "${r.entity}: ${r.value}"`);
+        return ok;
+      });
+      const untraceableCount = okValues.filter((ok) => !ok).length;
+      if (untraceableCount * 3 > block.rows.length) {
+        const lines = block.rows.map((r, i) => {
+          const value = okValues[i] ? ` (${r.value})` : "";
+          const detail = r.detail?.md ? ` — ${r.detail.md}` : "";
+          return `${r.rank}. **${r.entity}**${value}${detail}`;
+        });
+        const title = block.title ? `**${block.title}**\n\n` : "";
+        return { kind: "prose", md: title + lines.join("\n") };
+      }
+      const rows = block.rows.map((r, i) => {
+        const stats = r.detail?.stats?.filter((s) => {
+          const ok = traceable(s.value, allowed);
+          if (!ok) drop(`leaderboard stat "${s.label}: ${s.value}"`);
           return ok;
-        })
-        .map((r) => (r.detail?.stats
-          ? { ...r, detail: { ...r.detail, stats: r.detail.stats.filter((s) => {
-              const ok = traceable(s.value, allowed);
-              if (!ok) drop(`leaderboard stat "${s.label}: ${s.value}"`);
-              return ok;
-            }) } }
-          : r));
-      return rows.length ? { ...block, rows } : null;
+        });
+        return {
+          ...r,
+          value: okValues[i] ? r.value : "—",
+          ...(r.detail ? { detail: { ...r.detail, ...(stats ? { stats } : {}) } } : {}),
+        };
+      });
+      return { ...block, rows };
     }
     case "sections": {
       const sections = block.sections.map((s) => {
@@ -176,9 +231,10 @@ export function validateBlock(block: AnswerBlock, allowed: { strings: Set<string
   }
 }
 
-// Phase A: the gather tool loop. The model sees only CATALOGS — no raw data inlined —
-// and reads the series/page content the report will need. A cached card (a leaf
-// already pulled its CSV this turn) is served from the per-turn cache instantly with
+// FALLBACK gather tool loop — runs only when no card CSV was cached during research
+// (the common path serves cached CSVs deterministically, no LLM involved). The model
+// sees only CATALOGS — no raw data inlined — and reads the series/page content the
+// report will need. A cached card is served from the per-turn cache instantly with
 // no synthetic /v1/contents call; an uncached card costs a real, budgeted fetch.
 // Returns the analyst note + everything the model read; failure returns whatever was
 // read so far (compose proceeds without extra card contents — never throws).
@@ -262,37 +318,90 @@ export async function composeReport(ctx: ResearchCtx, question: string): Promise
   // (instant cache reads), so the model can read them freely.
   const catalog = dataCards.map((f) => ({
     id: f.card.cardId, title: f.title, entity: f.section, source: f.source,
-    description: f.card.description?.slice(0, 200),
+    description: f.card.description?.slice(0, 120),
     cached: !!(f.card.webpageUrl && ctx.contents.cache.get(f.card.webpageUrl)),
   }));
   const webCatalog = ctx.webSources
     .filter((w) => w.url)
     .map((w) => ({ url: w.url!, title: w.title, publisher: w.source, snippet: w.summary }));
 
-  const { notes: analystNotes, fetched } = await gatherCardContents(ctx, question, catalog, webCatalog);
+  // Deterministic gather: the leaves already pulled the CSVs the report can chart —
+  // serve them straight from the per-turn cache, question-relevant cards first, no
+  // LLM in the loop. The tool-loop gather survives only as a fallback for the rare
+  // turn where data cards exist but nothing got cached (e.g. the contents budget
+  // ran dry mid-research).
+  const questionLc = question.toLowerCase();
+  const mentioned = (f: (typeof dataCards)[number]) =>
+    [f.section, ...f.title.split(/\s+/)].some((t) => t && t.length >= 3 && questionLc.includes(t.toLowerCase()));
+  const fetched = new Map<string, string>();
+  dataCards
+    .map((f, i) => ({ f, i, csv: f.card.webpageUrl ? ctx.contents.cache.get(f.card.webpageUrl) : undefined }))
+    .filter((x): x is typeof x & { csv: string } => !!x.csv)
+    .sort((a, b) => Number(mentioned(b.f)) - Number(mentioned(a.f)) || a.i - b.i)
+    .slice(0, CARD_CONTENTS_PROMPT_CAP)
+    .forEach((x) => {
+      fetched.set(x.f.card.cardId, x.csv);
+      // Trace visibility: the report consumed this series. Cache reads cost no
+      // network, so the record is marked cached (ms 0) rather than left invisible.
+      const call: TakoCallRecord = {
+        callId: `${ctx.rootId}:contents:${ctx.calls.length}`, nodeId: ctx.rootId,
+        query: x.f.title, endpoint: "/v1/contents", effort: "fast", ms: 0, cached: true,
+        cards: [{ id: x.f.card.cardId, title: x.f.title, source: x.f.source, url: x.f.url }],
+      };
+      ctx.calls.push(call);
+      ctx.emit?.({ type: "tako_call", call });
+    });
+  let analystNotes = "";
+  if (fetched.size === 0 && catalog.length > 0) {
+    const gathered = await gatherCardContents(ctx, question, catalog, webCatalog);
+    analystNotes = gathered.notes;
+    for (const [id, csv] of gathered.fetched) fetched.set(id, csv);
+  }
 
   const subAnswers = ctx.branchResults.map((b) => ({
     question: b.question, claim: b.claim, confidence: b.confidence,
     keyFigures: b.figures.map((f) => ({ label: f.label, value: f.value, entity: f.entity })),
   }));
-  const figures = ctx.figures.map((f) => ({ label: f.label, value: f.value, entity: f.entity, source: f.source }));
+  // The report is a CUMULATIVE synthesis of the sub-answers — the prompt carries the
+  // claims + a SLIM figure pool, not the whole evidence corpus. FIGURES drops entries
+  // the sub-answers' keyFigures already carry, dedupes label|value repeats, and is
+  // capped; numeric validation below still runs against the FULL ctx.figures + CSV
+  // cache, so slimming the prompt can never make a real number untraceable.
+  const inKeyFigures = new Set(ctx.branchResults.flatMap((b) => b.figures.map((f) => `${f.label}|${f.value}`)));
+  const seenFig = new Set<string>();
+  const figures = ctx.figures
+    .filter((f) => {
+      const k = `${f.label}|${f.value}`;
+      if (inKeyFigures.has(k) || seenFig.has(k)) return false;
+      seenFig.add(k);
+      return true;
+    })
+    .slice(0, FIGURES_PROMPT_CAP)
+    .map((f) => ({ label: f.label, value: f.value, entity: f.entity, source: f.source }));
   // Snippets only — the full page content stayed behind the gather phase's
   // get_web_content tool; what mattered is already distilled into ANALYST_NOTES.
-  const webSources = ctx.webSources.map((w) => ({
-    title: w.title, publisher: w.source, snippet: w.summary,
+  const webSources = ctx.webSources.slice(0, WEB_PROMPT_CAP).map((w) => ({
+    title: w.title, publisher: w.source, snippet: w.summary?.slice(0, WEB_SNIPPET_CAP),
   }));
-  const cardContents = Array.from(fetched.entries()).map(([id, csv]) => ({
+  // Cached reads are free for the gather loop, so it can over-read — the emit prompt
+  // takes only the FIRST reads (the loop reads what it needs most first) at a bounded
+  // excerpt. Everything read still feeds validation below.
+  const cardContents = Array.from(fetched.entries()).slice(0, CARD_CONTENTS_PROMPT_CAP).map(([id, csv]) => ({
     cardId: id,
     title: catalog.find((c) => c.id === id)?.title,
     data: excerptCsv(csv, COMPOSER_CSV_EXCERPT, COMPOSER_CSV_ROWS),
   }));
 
   const prompt = `${ctx.ctxText}\n\nQUESTION: ${question}\n\nSUB_ANSWERS: ${JSON.stringify(subAnswers)}\n\nFIGURES: ${JSON.stringify(figures)}\n\nWEB_SOURCES: ${JSON.stringify(webSources)}\n\nCARD_CONTENTS: ${JSON.stringify(cardContents)}\n\nANALYST_NOTES: ${analystNotes || "(none)"}`;
+  log("tako", "answer-report prompt", {
+    chars: prompt.length, subAnswers: subAnswers.length, figures: figures.length,
+    cardContents: cardContents.length, read: fetched.size, web: webSources.length, catalog: catalog.length,
+  });
 
   let report: z.infer<typeof zAnswerReportEmit>;
   try {
     report = await generateStructured({
-      provider: "openai", model: deepModel(), reasoningEffort: "medium",
+      provider: "openai", model: deepModel(), reasoningEffort: synthEffort(),
       system: REPORT_SYSTEM, prompt, schema: zAnswerReportEmit, label: "answer-report",
     });
   } catch (e: unknown) {
@@ -316,10 +425,18 @@ export async function composeReport(ctx: ResearchCtx, question: string): Promise
   }
   const allowed = allowedSets([...ctx.figures, ...csvDerived]);
   let dropped = 0;
+  const droppedByKind: Record<string, number> = {};
   const blocks = report.blocks
-    .map((b) => validateBlock(b, allowed, () => { dropped++; }))
+    .map((b) => validateBlock(b, allowed, () => {
+      dropped++;
+      droppedByKind[b.kind] = (droppedByKind[b.kind] ?? 0) + 1;
+    }))
     .filter((b): b is AnswerBlock => b !== null);
-  if (dropped > 0) log("tako", "answer-report dropped untraceable numbers", { dropped });
+  if (dropped > 0 || blocks.length < report.blocks.length) {
+    log("tako", "answer-report dropped untraceable numbers", {
+      dropped, byKind: droppedByKind, prunedBlocks: report.blocks.length - blocks.length,
+    });
+  }
   // Graphy hero: modeled AFTER validation so it can reuse `allowed` (the full
   // figure + CSV-cache set) and the already-validated `blocks` for its fallback.
   let graphy: GraphyBlock | null = null;

@@ -1,6 +1,6 @@
 import type { ProviderId, CanvasOp } from "../../schema";
 
-export type RouteAction = "REPLACE" | "AUGMENT" | "GENERATE" | "EXPLAIN";
+export type RouteAction = "REPLACE" | "AUGMENT" | "GENERATE" | "EXPLAIN" | "RESEARCH";
 
 // Per-stage wall-clock (ms). Every field optional so partial runs still record.
 // In the recursive pipeline, graph/search/stream are parallel maxima, not sums.
@@ -27,8 +27,19 @@ export interface TakoCallRecord {
   effort: "fast" | "instant";
   web?: boolean;
   ms: number;
+  cached?: boolean; // served from the per-turn contents cache — no network round-trip
   cards: { id: string; title: string; source?: string; url?: string }[];
   error?: string; // present instead of cards when the call failed
+}
+
+// How the report's Graphy hero chart came to be this turn — persisted on the trace
+// and streamed live so the chat UI can show the modeling call and its outcome.
+export interface GraphyTraceInfo {
+  outcome: "modeled" | "fallback" | "none"; // LLM-modeled | converted report chart | no hero shipped
+  ms: number; // wall-clock of the modeling attempt (0 when it skipped straight to fallback)
+  series?: number; // series columns in the shipped config
+  rows?: number;
+  dropped?: number; // untraceable cells pruned (or that forced the discard)
 }
 
 // One raw Tako GRAPH API call (search or related), captured verbatim for the trace's
@@ -65,6 +76,8 @@ export interface TraceTreeNode {
   calls?: TakoCallRecord[]; // every Tako call this node issued (query→cards linkage)
   graphCalls?: GraphCallRecord[]; // every raw graph API call this node issued (params + response)
   graphMs?: number; // wall-clock ms of this node's whole graph phase (search + related + discovery)
+  totalMs?: number; // wall-clock ms of the node as a whole (decompose + graph + searches + synthesis; a branch spans its subtree; the synth node spans the entire run incl. gap round + compose)
+  composeMs?: number; // synth node only: wall-clock ms of the final composition (gather tool loop + report emit)
   gapFill?: boolean; // minted by the gap-fill round (renders with a badge)
 }
 
@@ -84,6 +97,7 @@ export interface TurnTrace {
   // fills these directly, since it has no research tree).
   calls?: TakoCallRecord[];
   reasoning?: { nodeId: string; question: string; rationale: string }[];
+  graphy?: GraphyTraceInfo; // how the report's Graphy hero was produced (absent when the toggle was off)
   // Which board nodes / Tako grounding actually fed this turn's answer.
   groundedIn?: {
     nodes: { id: string; title: string }[];
@@ -130,6 +144,8 @@ export type AgentEvent =
     }
   // A per-sub-query Tako call, individually traceable, keyed by nodeId.
   | { type: "tako_call"; call: TakoCallRecord }
+  // Graphy hero outcome — fired once after the modeling attempt resolves.
+  | { type: "graphy"; info: GraphyTraceInfo }
   // A raw graph API call (search/related), streamed live so the trace shows graph
   // activity per node while the run is in flight (the tree copy lands post-run).
   | { type: "graph_call"; nodeId: string; call: GraphCallRecord }

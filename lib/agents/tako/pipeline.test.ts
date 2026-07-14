@@ -10,9 +10,9 @@ const h = vi.hoisted(() => ({
   gapPlan: { sufficient: true, rationale: "covered", gaps: [] } as any,
   reportShouldFail: false, // when true, the "answer-report" call throws (composeReport → null)
   gatherCards: [] as string[], // cardIds the mocked composer gather loop pulls via get_card_contents
+  contentsCsv: "Timestamp,V\n2024,1" as string | null, // what takoContents returns (null → nothing cacheable)
   answer: { answer: "", cards: [] } as any, // takoAnswer result — root grounding + cohort resolution (Error → throw)
   cohortMembers: { entities: [], rationale: "" } as any, // cohort-resolve result (Error → throw)
-  overview: [] as any[], // graphOverview relations for every node (cohort roster)
 }));
 
 vi.mock("../../llm", () => ({
@@ -28,11 +28,12 @@ vi.mock("../../llm", () => ({
       if (String(opts.prompt).includes("CORRECTION:")) return h.plans[`${q}::correction`] ?? { atomic: true, rationale: "direct" };
       // Unresolvable-cohort re-plan carries a COHORT_UNAVAILABLE block.
       if (String(opts.prompt).includes("COHORT_UNAVAILABLE:")) return h.plans[`${q}::cohort-unavailable`] ?? { atomic: true, rationale: "direct" };
-      // Graph-grounded second pass carries a COHORT_GROUPS block.
-      if (String(opts.prompt).includes("COHORT_GROUPS:")) return h.plans[`${q}::groups`] ?? { atomic: true, rationale: "direct" };
       // Second decompose pass of cohort resolution carries a COHORT_MEMBERS block —
       // keyed separately so tests can hand back the per-member plan.
       if (String(opts.prompt).includes("COHORT_MEMBERS:")) return h.plans[`${q}::members`] ?? { atomic: true, rationale: "direct" };
+      // Grounded re-plan (needsFreshContext) carries a GROUNDED_ANSWER block — checked
+      // AFTER the COHORT_* keys, whose second passes may also carry the grounding.
+      if (String(opts.prompt).includes("GROUNDED_ANSWER:")) return h.plans[`${q}::grounded`] ?? h.plans[q] ?? { atomic: true, rationale: "direct" };
       // Default: atomic with NO lookup override, so a sub-question keeps the lookup
       // its parent assigned it (a real decompose for "amd revenue" would return AMD).
       return h.plans[q] ?? { atomic: true, rationale: "direct" };
@@ -53,7 +54,6 @@ vi.mock("../../llm", () => ({
       return { queries: ent ? h.related.map((m: string) => `${ent} ${m}`) : [] };
     }
     if (opts.label === "compose") return { queries: h.composeFallback };
-    if (opts.label === "broad-compose") return { queries: ["macro overview"] };
     if (opts.label === "answer-report") {
       if (h.reportShouldFail) throw new Error("answer-report boom");
       return h.report;
@@ -79,9 +79,6 @@ vi.mock("./graph", () => ({
   // never searches the metric namespace; strategy.test.ts locks that).
   graphSearch: vi.fn(async (name: string) => [{ id: `${name}-id`, name, type: "entity" }]),
   graphRelated: vi.fn(async () => h.related.map((name, i) => ({ id: `m${i}`, name, aliases: [] }))),
-  graphOverview: vi.fn(async (nodeId: string) => ({
-    node: { id: nodeId, name: `node:${nodeId}`, type: "entity" }, relations: h.overview,
-  })),
 }));
 
 vi.mock("../../tako", () => ({
@@ -95,7 +92,7 @@ vi.mock("../../tako", () => ({
     opts.onCall?.({ query: q, endpoint: "/v3/search", effort: opts.effort ?? "fast", web: !!opts.web, ms: 1, cards });
     return cards;
   }),
-  takoContents: vi.fn(async () => ({ csv: "Timestamp,V\n2024,1" })),
+  takoContents: vi.fn(async () => ({ csv: h.contentsCsv })),
   takoAnswer: vi.fn(async () => {
     if (h.answer instanceof Error) throw h.answer;
     return h.answer;
@@ -129,9 +126,9 @@ beforeEach(() => {
   h.gapPlan = { sufficient: true, rationale: "covered", gaps: [] };
   h.reportShouldFail = false;
   h.gatherCards = [];
+  h.contentsCsv = "Timestamp,V\n2024,1";
   h.answer = { answer: "", cards: [] };
   h.cohortMembers = { entities: [], rationale: "" };
-  h.overview = [];
 });
 
 describe("runTakoInitial — recursive research tree", () => {
@@ -151,7 +148,9 @@ describe("runTakoInitial — recursive research tree", () => {
     const edges = result.nodeOps.filter((o: any) => o.op === "add_edge").map((o: any) => o.edge);
     expect(edges.some((e: any) => e.kind === "feeds")).toBe(true); // card → leaf
     expect(edges.filter((e: any) => e.kind === "derived_from" && e.to === "synth").length).toBe(2);
-    expect(edges.some((e: any) => e.kind === "feeds" && e.to === "synth")).toBe(true); // broad card → synth
+    // the synthesis node does NO searching of its own — no card ever feeds it directly
+    expect(edges.some((e: any) => e.kind === "feeds" && e.to === "synth")).toBe(false);
+    expect((result.trace.calls ?? []).filter((c) => c.nodeId === "synth" && c.endpoint === "/v3/search")).toHaveLength(0);
 
     // grounded queries are entity×metric pairs (no free-form drift) — the root
     // grounding /v1/answer call also mentions Nvidia, so match searches only
@@ -214,7 +213,7 @@ describe("runTakoInitial — recursive research tree", () => {
     const result = await runTakoInitial(req, () => {});
     const grounded = (result.trace.calls ?? [])
       .filter((c) => c.endpoint !== "/v1/contents") // CSV pulls ride the trace too, but aren't searches
-      .map((c) => c.query).filter((q) => q !== "macro overview");
+      .map((c) => c.query);
     // ≤3 total, only ONE revenue-family query survives, the distinct concept is kept
     expect(grounded.length).toBeLessThanOrEqual(3);
     expect(grounded.filter((q) => /revenue/i.test(q)).length).toBe(1);
@@ -233,14 +232,67 @@ describe("runTakoInitial — recursive research tree", () => {
     expect(events.some((e) => e.type === "tako_call" && e.call.endpoint === "/v1/contents")).toBe(true);
   });
 
-  it("merges the composer's get_card_contents calls into the synth tree node", async () => {
-    h.plans["compare Nvidia and AMD"] = twoBranchPlan;
-    h.gatherCards = ["nvda"];
+  it("merges the fallback gather's get_card_contents calls into the synth tree node", async () => {
+    // No leaf manages to cache a CSV this turn (contents API returns nothing), so the
+    // composer falls back to the LLM gather loop; its fetch attempt for "c-macro ou"
+    // (a card with no webpageUrl) is recorded on the synth node.
+    h.plans["compare Nvidia and AMD"] = {
+      ...twoBranchPlan,
+      subQuestions: [
+        ...twoBranchPlan.subQuestions,
+        { question: "macro outlook", entities: ["Macro"], metricFilters: ["Outlook"] },
+      ],
+    };
+    h.contentsCsv = null;
+    h.gatherCards = ["c-macro ou"];
     const result = await runTakoInitial(req, () => {});
     const synthNode = result.trace.tree?.find((n) => n.nodeId === "synth");
     const contents = synthNode?.calls?.filter((c) => c.endpoint === "/v1/contents") ?? [];
     expect(contents.length).toBe(1); // survives into the per-node view the final trace renders
-    expect(contents[0].cards[0].id).toBe("nvda");
+    expect(contents[0].cards[0].id).toBe("c-macro ou");
+  });
+
+  it("the composer serves leaf-cached cards deterministically — cache-read records, no network", async () => {
+    h.plans["compare Nvidia and AMD"] = twoBranchPlan;
+    // nvda/amd CSVs were already pulled by their leaves (contents cache) → the composer
+    // inlines them directly; the gather loop never runs. Each cache read mints an
+    // honest cached:true record on the synth node so the trace UI shows the series
+    // the report consumed.
+    h.gatherCards = ["nvda"];
+    const result = await runTakoInitial(req, () => {});
+    const synthNode = result.trace.tree?.find((n) => n.nodeId === "synth");
+    const contents = synthNode?.calls?.filter((c) => c.endpoint === "/v1/contents") ?? [];
+    expect(contents.length).toBeGreaterThan(0);
+    expect(contents.every((c) => c.cached === true && c.ms === 0)).toBe(true);
+  });
+
+  it("no LLM gather call when leaf CSVs are cached — the report still composes", async () => {
+    h.plans["compare Nvidia and AMD"] = twoBranchPlan; // catalog is exactly the leaf cards, all cached
+    const { generateWithTools, generateStructured } = await import("../../llm");
+    const result = await runTakoInitial(req, () => {});
+    // Deterministic gather: the cached CSVs go straight into the emit prompt.
+    expect(generateWithTools).not.toHaveBeenCalled();
+    const reportCall = (generateStructured as any).mock.calls.find((c: any) => c[0].label === "answer-report")[0];
+    expect(String(reportCall.prompt)).toContain("CARD_CONTENTS");
+    expect(String(reportCall.prompt)).toContain("Timestamp"); // cached CSV inlined for the emit
+    // the report still composes, validated against the leaf-cached CSV figures
+    const synthUpdate = result.nodeOps.filter((o: any) => o.op === "update_node" && o.id === "synth").pop() as any;
+    expect(synthUpdate.patch.report?.verdict).toContain("Nvidia leads");
+  });
+
+  it("stamps per-node wall-clock totals: every tree node totalMs, synth also composeMs", async () => {
+    h.plans["compare Nvidia and AMD"] = twoBranchPlan;
+    const result = await runTakoInitial(req, () => {});
+    for (const n of result.trace.tree ?? []) {
+      expect(typeof n.totalMs).toBe("number");
+      expect(n.totalMs!).toBeGreaterThanOrEqual(0);
+    }
+    const synthNode = result.trace.tree?.find((n) => n.nodeId === "synth");
+    expect(typeof synthNode?.composeMs).toBe("number");
+    // the synth node spans the whole run — no child can outlast it
+    for (const n of result.trace.tree ?? []) {
+      if (n.nodeId !== "synth") expect(n.totalMs!).toBeLessThanOrEqual(synthNode!.totalMs!);
+    }
   });
 
   it("a sub-question that re-splits into ITSELF + an invented sibling stays a leaf", async () => {
@@ -262,6 +314,49 @@ describe("runTakoInitial — recursive research tree", () => {
     expect(nvidiaLeaf?.kind).toBe("leaf");
   });
 
+  it("a valid split suppressed by the research budget leaves a visible note", async () => {
+    // Root reserves 6; each child tries to reserve 6 more — the cap (20) lets only two
+    // through, so at least one child's valid split is suppressed and must say so.
+    const wide = (names: string[]) => ({
+      atomic: false, rationale: "split", entities: ["Nvidia"], metricFilters: ["Revenue"],
+      subQuestions: names.map((n) => ({ question: n, entities: [n], metricFilters: ["Revenue"] })),
+    });
+    const kids = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta"];
+    h.plans["compare Nvidia and AMD"] = wide(kids);
+    for (const k of kids) h.plans[k] = wide(["one", "two", "three", "four", "five", "six"].map((w) => `${k} ${w}`));
+    const result = await runTakoInitial(req, () => {});
+    expect(result.trace.notes?.some((n) => n.includes("suppressed — research budget exhausted"))).toBe(true);
+  });
+
+  it("fences each child decompose with its siblings' questions", async () => {
+    h.plans["compare Nvidia and AMD"] = twoBranchPlan;
+    await runTakoInitial(req, () => {});
+    const { generateStructured } = await import("../../llm");
+    const nvidiaDec = vi.mocked(generateStructured).mock.calls
+      .find(([o]: any) => o.label === "decompose" && String(o.prompt).includes("RESEARCH_QUESTION: nvidia revenue"))![0] as any;
+    expect(nvidiaDec.prompt).toContain("SIBLING_QUESTIONS");
+    expect(nvidiaDec.prompt).toContain("- amd revenue"); // the other lane, marked already-covered
+    // the root decompose has no siblings — no fence block
+    const rootDec = vi.mocked(generateStructured).mock.calls
+      .find(([o]: any) => o.label === "decompose" && String(o.prompt).includes("RESEARCH_QUESTION: compare Nvidia and AMD"))![0] as any;
+    expect(rootDec.prompt).not.toContain("SIBLING_QUESTIONS");
+  });
+
+  it("drops reworded parent restatements and duplicate siblings — paraphrase brake", async () => {
+    h.plans["compare Nvidia and AMD"] = {
+      atomic: false, rationale: "split", entities: ["Nvidia"], metricFilters: ["Revenue"],
+      subQuestions: [
+        { question: "Compare Nvidia and AMD!", entities: ["Nvidia"], metricFilters: ["Revenue"] }, // parent, reworded
+        { question: "nvidia revenue", entities: ["Nvidia"], metricFilters: ["Revenue"] },
+        { question: "Nvidia revenue?", entities: ["Nvidia"], metricFilters: ["Revenue"] }, // sibling, reworded
+        { question: "amd revenue", entities: ["AMD"], metricFilters: ["Revenue"] },
+      ],
+    };
+    const result = await runTakoInitial(req, () => {});
+    const research = result.nodeOps.filter((o: any) => o.op === "add_node" && o.node.role === "research") as any[];
+    expect(research.map((o) => o.node.title).sort()).toEqual(["amd revenue", "nvidia revenue"]);
+  });
+
   it("an atomic query produces a single synthesis block, no research nodes", async () => {
     h.plans["compare Nvidia and AMD"] = { atomic: true, rationale: "direct", entities: ["Nvidia"], metricFilters: ["Revenue"] };
     const result = await runTakoInitial(req, () => {});
@@ -271,7 +366,7 @@ describe("runTakoInitial — recursive research tree", () => {
     expect(synthOps[0].op).toBe("add_node"); // node exists before its update
   });
 
-  it("reuses one card node across branches, linking the duplicate with a supports edge", async () => {
+  it("reuses one card node across branches without drawing a cross-branch edge", async () => {
     // Both sub-questions resolve to the SAME entity/metric → same card returned twice.
     h.plans["compare Nvidia and AMD"] = {
       atomic: false, rationale: "split", entities: ["Nvidia"], metricFilters: ["Revenue"],
@@ -286,9 +381,10 @@ describe("runTakoInitial — recursive research tree", () => {
     expect(added.filter((o) => o.node.tako?.cardId === "nvda").length).toBe(1);
     const edges = result.nodeOps.filter((o: any) => o.op === "add_edge").map((o: any) => o.edge);
     const nvdaNodeId = added.find((o) => o.node.tako?.cardId === "nvda").node.id;
-    // one feeds edge (first branch) + a supports edge to the second branch that reused it
+    // exactly one feeds edge (to the first branch) — the reusing branch gets NO edge,
+    // so the card stays visually connected only to its original parent
     expect(edges.filter((e: any) => e.from === nvdaNodeId && e.kind === "feeds").length).toBe(1);
-    expect(edges.some((e: any) => e.from === nvdaNodeId && e.kind === "supports")).toBe(true);
+    expect(edges.some((e: any) => e.from === nvdaNodeId && e.kind === "supports")).toBe(false);
   });
 
   it("cites web results as per-answer sources (see-sources), NOT as canvas nodes", async () => {
@@ -482,7 +578,7 @@ describe("runTakoInitial — cohort resolution", () => {
     ],
   };
 
-  it("resolves the class via takoAnswer, re-decomposes per member, nodes the answer's cards", async () => {
+  it("resolves the class via takoAnswer and re-decomposes per member — answer cards stay OFF the board", async () => {
     h.plans["identify emerging infrastructure startups"] = classPlan;
     h.plans["identify emerging infrastructure startups::members"] = memberPlan;
     h.answer = {
@@ -503,17 +599,58 @@ describe("runTakoInitial — cohort resolution", () => {
     expect(events.some((e) => e.type === "tako_call" && e.call.endpoint === "/v1/answer")).toBe(true);
     expect(events.some((e) => e.type === "trace" && e.stage.startsWith("resolving cohort"))).toBe(true);
 
-    // the answer's card landed on the board, feeding the synth
+    // grounding is a planning aid only — its card is NOT noded onto the canvas
     const added = result.nodeOps.filter((o: any) => o.op === "add_node") as any[];
-    const answerCard = added.find((o) => o.node.tako?.cardId === "cs1");
-    expect(answerCard).toBeTruthy();
-    const edges = result.nodeOps.filter((o: any) => o.op === "add_edge").map((o: any) => o.edge);
-    expect(edges.some((e: any) => e.kind === "feeds" && e.from === answerCard.node.id && e.to === "synth")).toBe(true);
+    expect(added.find((o) => o.node.tako?.cardId === "cs1")).toBeUndefined();
 
     // sub-questions are per-member, not class-wide
     const research = added.filter((o) => o.node.role === "research").map((o) => o.node.title);
     expect(research).toEqual(expect.arrayContaining(["Stategraph funding", "Runplane funding"]));
     expect(result.trace.notes?.some((n) => n.includes('cohort "emerging infrastructure startups" resolved to: Stategraph, Runplane'))).toBe(true);
+  });
+
+  // Observed live: the second pass declared the split in its rationale ("two concrete
+  // companies to research one-by-one") but returned NO subQuestions — and the node
+  // leafed. With the members already resolved, the split is rebuilt in code.
+  it("a flubbed second pass (split rationale, no subs) still branches — deterministic per-member fallback", async () => {
+    h.plans["identify emerging infrastructure startups"] = classPlan;
+    h.plans["identify emerging infrastructure startups::members"] = {
+      atomic: false, rationale: "This is a split: cover the named members first", entities: ["Stategraph"], metricFilters: ["Funding"],
+    }; // split intent, NO subQuestions
+    h.answer = { answer: "Stategraph and Runplane lead the cohort.", cards: [] };
+    h.cohortMembers = { entities: ["Stategraph", "Runplane"], rationale: "named in the answer" };
+    const result = await runTakoInitial(cohortReq, () => {});
+
+    // branched into one research node per resolved member, entities = the member names
+    const research = result.nodeOps.filter((o: any) => o.op === "add_node" && o.node.role === "research") as any[];
+    expect(research).toHaveLength(2);
+    const memberLeaves = (result.trace.tree ?? []).filter((n) => n.kind === "leaf");
+    expect(memberLeaves.map((n) => n.entities?.[0]).sort()).toEqual(["Runplane", "Stategraph"]);
+    expect(memberLeaves.every((n) => n.metrics?.includes("Funding"))).toBe(true);
+    expect(result.trace.notes?.some((n) => n.includes("split rebuilt deterministically from 2 resolved members"))).toBe(true);
+
+    // the rebuild is code, not another LLM round-trip: no CORRECTION decompose ran
+    const { generateStructured } = await import("../../llm");
+    const corrections = vi.mocked(generateStructured).mock.calls.filter(([o]: any) =>
+      o.label === "decompose" && String(o.prompt).includes("CORRECTION:"));
+    expect(corrections).toHaveLength(0);
+  });
+
+  it("the split-intent CORRECTION retry keeps the COHORT_MEMBERS block in its prompt", async () => {
+    // Fallback needs ≥2 members — a single-member cohort exercises the LLM correction
+    // path instead, which must still see the member list.
+    h.plans["identify emerging infrastructure startups"] = classPlan;
+    h.plans["identify emerging infrastructure startups::members"] = {
+      atomic: false, rationale: "split per member", entities: ["Stategraph"], metricFilters: ["Funding"],
+    }; // split intent, no subs, 1 member → correction path
+    h.answer = { answer: "Only Stategraph is named.", cards: [] };
+    h.cohortMembers = { entities: ["Stategraph"], rationale: "one member" };
+    await runTakoInitial(cohortReq, () => {});
+    const { generateStructured } = await import("../../llm");
+    const correction = vi.mocked(generateStructured).mock.calls.find(([o]: any) =>
+      o.label === "decompose" && String(o.prompt).includes("CORRECTION:"))?.[0] as any;
+    expect(correction).toBeTruthy();
+    expect(String(correction.prompt)).toContain('COHORT_MEMBERS: ["Stategraph"]');
   });
 
   it("takoAnswerEnabled:false skips cohort resolution entirely", async () => {
@@ -534,12 +671,32 @@ describe("runTakoInitial — cohort resolution", () => {
   });
 });
 
-// EVERY root decompose is grounded by a tako answer first (not just cohort questions):
-// the answer's prose + card titles feed the decompose prompt, its cards land on the
-// board feeding the synth, and failures never kill the turn.
-describe("runTakoInitial — root answer grounding", () => {
-  it("calls takoAnswer BEFORE decompose and feeds the answer into the decompose prompt", async () => {
+// Grounding is CONDITIONAL and prompt-only: the split decision runs first from the
+// question text; /v1/answer fires only when the plan sets needsFreshContext (or the
+// plan is a cohort), its prose + card titles feed a decompose RE-PLAN, its cards
+// never land on the board, and failures never kill the turn.
+describe("runTakoInitial — conditional root answer grounding", () => {
+  const freshPlan = {
+    ...twoBranchPlan,
+    rationale: "drivers must come from current data",
+    needsFreshContext: true,
+  };
+
+  it("a plan that never asks for fresh context makes NO /v1/answer call", async () => {
     h.plans["compare Nvidia and AMD"] = twoBranchPlan;
+    h.answer = { answer: "should never be fetched", cards: [] };
+    const { takoAnswer } = await import("../../tako");
+    const result = await runTakoInitial(req, () => {});
+    expect(takoAnswer).not.toHaveBeenCalled();
+    expect(result.trace.answerUsed).toBe(false);
+    const { generateStructured } = await import("../../llm");
+    const dec = vi.mocked(generateStructured).mock.calls.find(([o]: any) => o.label === "decompose")![0] as any;
+    expect(dec.prompt).not.toContain("GROUNDED_ANSWER");
+  });
+
+  it("needsFreshContext grounds AFTER the first decompose and feeds a grounded re-plan — cards stay off the board", async () => {
+    h.plans["compare Nvidia and AMD"] = freshPlan;
+    h.plans["compare Nvidia and AMD::grounded"] = twoBranchPlan;
     h.answer = {
       answer: "Nvidia's data-center revenue drives the gap over AMD.",
       cards: [{ cardId: "ga1", title: "NVDA Data Center Revenue", embedUrl: "https://e/ga1", webpageUrl: "https://w/ga1", source: "S&P Global" }],
@@ -556,28 +713,29 @@ describe("runTakoInitial — root answer grounding", () => {
     expect(events.some((e) => e.type === "tako_call" && e.call.endpoint === "/v1/answer")).toBe(true);
     expect(events.some((e) => e.type === "trace" && e.stage.includes("grounding"))).toBe(true);
 
-    // the answer ran BEFORE the first decompose, and grounded its prompt
+    // the split decision ran FIRST: first root decompose precedes the answer call and
+    // is ungrounded; the grounded RE-PLAN carries the answer + card titles
     const { generateStructured } = await import("../../llm");
-    const decomposeIdx = vi.mocked(generateStructured).mock.calls.findIndex(([o]: any) => o.label === "decompose");
-    const decomposeOrder = vi.mocked(generateStructured).mock.invocationCallOrder[decomposeIdx];
-    expect(vi.mocked(takoAnswer).mock.invocationCallOrder[0]).toBeLessThan(decomposeOrder);
-    const dec = vi.mocked(generateStructured).mock.calls[decomposeIdx][0] as any;
-    expect(dec.prompt).toContain("GROUNDED_ANSWER: Nvidia's data-center revenue");
-    expect(dec.prompt).toContain('"NVDA Data Center Revenue"'); // CARD_TITLES
+    const rootDecomposes = vi.mocked(generateStructured).mock.calls
+      .map((c, i) => ({ o: c[0] as any, order: vi.mocked(generateStructured).mock.invocationCallOrder[i] }))
+      .filter(({ o }) => o.label === "decompose" && String(o.prompt).includes("RESEARCH_QUESTION: compare Nvidia and AMD"));
+    expect(rootDecomposes).toHaveLength(2);
+    expect(rootDecomposes[0].order).toBeLessThan(vi.mocked(takoAnswer).mock.invocationCallOrder[0]);
+    expect(String(rootDecomposes[0].o.prompt)).not.toContain("GROUNDED_ANSWER");
+    expect(String(rootDecomposes[1].o.prompt)).toContain("GROUNDED_ANSWER: Nvidia's data-center revenue");
+    expect(String(rootDecomposes[1].o.prompt)).toContain('"NVDA Data Center Revenue"'); // CARD_TITLES
 
-    // the answer's card landed on the board, feeding the synth
+    // grounding is a planning aid only — its card is NOT noded onto the canvas
     const added = result.nodeOps.filter((o: any) => o.op === "add_node") as any[];
-    const answerCard = added.find((o) => o.node.tako?.cardId === "ga1");
-    expect(answerCard).toBeTruthy();
-    const edges = result.nodeOps.filter((o: any) => o.op === "add_edge").map((o: any) => o.edge);
-    expect(edges.some((e: any) => e.kind === "feeds" && e.from === answerCard.node.id && e.to === "synth")).toBe(true);
+    expect(added.find((o) => o.node.tako?.cardId === "ga1")).toBeUndefined();
 
-    // provenance flag on the trace
+    // the grounded re-plan's split ran; provenance flag on the trace
+    expect(added.filter((o) => o.node.role === "research")).toHaveLength(2);
     expect(result.trace.answerUsed).toBe(true);
   });
 
-  it("takoAnswerEnabled:false → decompose runs ungrounded, no /v1/answer call", async () => {
-    h.plans["compare Nvidia and AMD"] = twoBranchPlan;
+  it("takoAnswerEnabled:false → even a needsFreshContext plan runs ungrounded, no /v1/answer call", async () => {
+    h.plans["compare Nvidia and AMD"] = freshPlan;
     h.answer = { answer: "should never be fetched", cards: [] };
     const { takoAnswer } = await import("../../tako");
     const result = await runTakoInitial({ ...req, takoAnswerEnabled: false }, () => {});
@@ -588,26 +746,27 @@ describe("runTakoInitial — root answer grounding", () => {
     expect(result.trace.answerUsed).toBe(false);
   });
 
-  it("takoAnswer failure is contained: note pushed, ungrounded decompose proceeds, turn completes", async () => {
-    h.plans["compare Nvidia and AMD"] = twoBranchPlan;
+  it("takoAnswer failure is contained: note pushed, the ungrounded plan proceeds, turn completes", async () => {
+    h.plans["compare Nvidia and AMD"] = freshPlan;
     h.answer = new Error("answer down");
     const result = await runTakoInitial(req, () => {});
     expect(result.trace.notes?.some((n) => n.includes("answer grounding failed"))).toBe(true);
     const { generateStructured } = await import("../../llm");
-    const dec = vi.mocked(generateStructured).mock.calls.find(([o]: any) => o.label === "decompose")![0] as any;
-    expect(dec.prompt).not.toContain("GROUNDED_ANSWER");
+    // grounding failed → no grounded re-plan; every decompose stayed ungrounded
+    const decs = vi.mocked(generateStructured).mock.calls.filter(([o]: any) => o.label === "decompose");
+    expect(decs.every(([o]: any) => !String(o.prompt).includes("GROUNDED_ANSWER"))).toBe(true);
     // the research tree still ran to a composed answer
     expect(result.nodeOps.some((o: any) => o.op === "add_node" && o.node.role === "synthesis")).toBe(true);
     expect(result.trace.answerUsed).toBe(false);
   });
 
-  it("an empty answer (no prose, no cards) leaves the decompose prompt ungrounded", async () => {
-    h.plans["compare Nvidia and AMD"] = twoBranchPlan;
+  it("an empty answer (no prose, no cards) skips the re-plan and leaves decompose ungrounded", async () => {
+    h.plans["compare Nvidia and AMD"] = freshPlan;
     h.answer = { answer: "", cards: [] };
     const result = await runTakoInitial(req, () => {});
     const { generateStructured } = await import("../../llm");
-    const dec = vi.mocked(generateStructured).mock.calls.find(([o]: any) => o.label === "decompose")![0] as any;
-    expect(dec.prompt).not.toContain("GROUNDED_ANSWER");
+    const decs = vi.mocked(generateStructured).mock.calls.filter(([o]: any) => o.label === "decompose");
+    expect(decs.every(([o]: any) => !String(o.prompt).includes("GROUNDED_ANSWER"))).toBe(true);
     expect(result.trace.answerUsed).toBe(false);
   });
 
@@ -638,108 +797,87 @@ describe("runTakoInitial — root answer grounding", () => {
   });
 });
 
-// Graph-grounded cohort roster: a cohort question first tries the anchor's graph
-// relations (exhaustive, pre-resolved member ids) via a COHORT_GROUPS second pass,
-// falling back to the old answer-prose extraction only when the graph has nothing.
-describe("graph-grounded cohort resolution", () => {
-  const nbaReq = { ...req, message: "How do all NBA teams compare on attendance?" };
-  const Q = "How do all NBA teams compare on attendance?";
-  const firstPass = {
-    atomic: false, rationale: "class question", cohort: "NBA teams",
-    entities: ["National Basketball Association", "NBA"], metricFilters: ["attendance"],
-  };
-  const teamsGroup = {
-    key: "rel:has_team", kind: "related", label: "Has team", total: 3, total_capped: false,
-    items: [
-      { id: "ent::bulls::1", name: "Chicago Bulls", type: "entity", aliases: ["Bulls"] },
-      { id: "ent::knicks::1", name: "New York Knicks", type: "entity", aliases: [] },
-      { id: "ent::lakers::1", name: "Los Angeles Lakers", type: "entity", aliases: [] },
+// Sub-question-level cohort resolution: a multi-sector question splits into per-sector
+// sub-questions, each of which is ITSELF a cohort resolved via its OWN /v1/answer call
+// (Answer-only, any depth) — the members become per-company leaves.
+describe("runTakoInitial — sub-question cohort resolution (multi-sector)", () => {
+  const sectorReq = { ...req, message: "research the automotive and semiconductor sectors in Asia" };
+  const ROOT_Q = "research the automotive and semiconductor sectors in Asia";
+  // Root: a plain split into two sector sub-questions (NOT a cohort itself).
+  const rootSplit = {
+    atomic: false, rationale: "two sectors — one sub-question per sector",
+    entities: ["Asia markets"], metricFilters: ["revenue"],
+    subQuestions: [
+      { question: "automotive companies in Asia", entities: ["Asian automotive companies"], metricFilters: ["revenue"] },
+      { question: "semiconductor companies in Asia", entities: ["Asian semiconductor companies"], metricFilters: ["revenue"] },
     ],
   };
-  const memberSubs = ["Chicago Bulls", "New York Knicks", "Los Angeles Lakers"].map((n) => ({
-    question: `${n} attendance`, entities: [n], metricFilters: ["attendance"],
-  }));
+  // Each sector sub-question is a cohort (members unknown from the question text).
+  const autoCohort = { atomic: false, rationale: "class question", cohort: "automotive companies in Asia", entities: ["Asian automotive companies"], metricFilters: ["revenue"] };
+  const semiCohort = { atomic: false, rationale: "class question", cohort: "semiconductor companies in Asia", entities: ["Asian semiconductor companies"], metricFilters: ["revenue"] };
+  const autoMembers = {
+    atomic: false, rationale: "one sub per member", entities: ["Asian automotive companies"], metricFilters: ["revenue"],
+    subQuestions: [
+      { question: "Toyota revenue", entities: ["Toyota Motor"], metricFilters: ["revenue"] },
+      { question: "Honda revenue", entities: ["Honda Motor"], metricFilters: ["revenue"] },
+    ],
+  };
+  const semiMembers = {
+    atomic: false, rationale: "one sub per member", entities: ["Asian semiconductor companies"], metricFilters: ["revenue"],
+    subQuestions: [
+      { question: "TSMC revenue", entities: ["TSMC"], metricFilters: ["revenue"] },
+      { question: "Samsung revenue", entities: ["Samsung Electronics"], metricFilters: ["revenue"] },
+    ],
+  };
 
-  it("plans per-member from the graph roster and never calls cohort-resolve or /v1/answer extraction", async () => {
-    h.plans[Q] = firstPass;
-    h.plans[`${Q}::groups`] = { atomic: false, rationale: "per member", entities: ["National Basketball Association"], metricFilters: ["attendance"], subQuestions: memberSubs };
-    h.overview = [teamsGroup];
+  function wirePlans() {
+    h.plans[ROOT_Q] = rootSplit;
+    h.plans["automotive companies in Asia"] = autoCohort;
+    h.plans["semiconductor companies in Asia"] = semiCohort;
+    h.plans["automotive companies in Asia::members"] = autoMembers;
+    h.plans["semiconductor companies in Asia::members"] = semiMembers;
+    h.answer = { answer: "Leading Asian firms include Toyota, Honda, TSMC and Samsung.", cards: [] };
+    h.cohortMembers = { entities: ["Toyota Motor", "Honda Motor"], rationale: "named in the grounded answer" };
+  }
+
+  it("resolves EACH sector sub-question via its own /v1/answer call and researches per-company", async () => {
+    wirePlans();
+    const result = await runTakoInitial(sectorReq, () => {});
+
+    // The root is a plain split (no cohort), so it does NOT ground; each of the two
+    // sector sub-questions grounds once → exactly two /v1/answer calls.
+    const { takoAnswer } = await import("../../tako");
+    expect(takoAnswer).toHaveBeenCalledTimes(2);
+
+    // Both answer calls attach to a sub-question research node, never the root synth.
+    const answerCalls = (result.trace.calls ?? []).filter((c) => c.endpoint === "/v1/answer");
+    expect(answerCalls).toHaveLength(2);
+    expect(answerCalls.every((c) => c.nodeId !== "synth")).toBe(true);
+    expect(new Set(answerCalls.map((c) => c.nodeId)).size).toBe(2); // distinct nodes
+
+    // Both sectors ran the COHORT_MEMBERS second pass.
     const { generateStructured } = await import("../../llm");
-    await runTakoInitial(nbaReq, () => {});
-    const labels = (generateStructured as any).mock.calls.map((c: any[]) => c[0].label);
-    expect(labels).not.toContain("cohort-resolve");
-    const prompts = (generateStructured as any).mock.calls.map((c: any[]) => String(c[0].prompt));
-    expect(prompts.some((p: string) => p.includes("COHORT_GROUPS:") && p.includes("Has team"))).toBe(true);
+    const memberPasses = (generateStructured as any).mock.calls
+      .filter((c: any[]) => c[0].label === "decompose" && String(c[0].prompt).includes("COHORT_MEMBERS:"));
+    expect(memberPasses).toHaveLength(2);
   });
 
-  it("member leaves carry pre-resolved node ids — no graph/search for member names", async () => {
-    h.plans[Q] = firstPass;
-    h.plans[`${Q}::groups`] = { atomic: false, rationale: "per member", entities: ["National Basketball Association"], metricFilters: ["attendance"], subQuestions: memberSubs };
-    h.overview = [teamsGroup];
-    const { graphSearch } = await import("./graph");
-    await runTakoInitial(nbaReq, () => {});
-    const searched = (graphSearch as any).mock.calls.map((c: any[]) => c[0]);
-    expect(searched).not.toContain("Chicago Bulls"); // pre-resolved: leaf skipped entity search
+  it("mints per-company research leaves under each sector", async () => {
+    wirePlans();
+    const result = await runTakoInitial(sectorReq, () => {});
+    const research = result.nodeOps
+      .filter((o: any) => o.op === "add_node" && o.node.role === "research")
+      .map((o: any) => o.node.title);
+    expect(research).toEqual(expect.arrayContaining([
+      "automotive companies in Asia", "semiconductor companies in Asia",
+      "Toyota revenue", "Honda revenue", "TSMC revenue", "Samsung revenue",
+    ]));
   });
 
-  it("member leaves keep pre-resolved node ids even when their own re-plan returns entities", async () => {
-    // Each member sub-question recurses into research() at depth 1 and runs its OWN
-    // decompose. A real child decompose always returns entities (it re-words the
-    // candidate name for the same subject) — adopting the child's own lookup must not
-    // drop the parent-assigned roster node id, or the leaf re-searches the member by name.
-    h.plans[Q] = firstPass;
-    h.plans[`${Q}::groups`] = { atomic: false, rationale: "per member", entities: ["National Basketball Association"], metricFilters: ["attendance"], subQuestions: memberSubs };
-    h.overview = [teamsGroup];
-    for (const n of ["Chicago Bulls", "New York Knicks", "Los Angeles Lakers"]) {
-      h.plans[`${n} attendance`] = { atomic: true, rationale: "leaf", entities: [n, n.split(" ").pop()!], metricFilters: ["attendance"] };
-    }
-    const { graphSearch } = await import("./graph");
-    await runTakoInitial(nbaReq, () => {});
-    const searched = (graphSearch as any).mock.calls.map((c: any[]) => c[0]);
-    expect(searched).not.toContain("Chicago Bulls");
-    expect(searched).not.toContain("New York Knicks");
-    expect(searched).not.toContain("Los Angeles Lakers");
-  });
-
-  it("drills the full roster when total exceeds inline members, into a note", async () => {
-    h.plans[Q] = firstPass;
-    h.plans[`${Q}::groups`] = { atomic: false, rationale: "per member", entities: ["National Basketball Association"], metricFilters: ["attendance"], subQuestions: memberSubs.slice(0, 2) };
-    h.overview = [{ ...teamsGroup, total: 30 }]; // 30 known, 3 inline
-    const { graphRelated } = await import("./graph");
-    const result = await runTakoInitial(nbaReq, () => {});
-    const drill = (graphRelated as any).mock.calls.find((c: any[]) => c[1]?.relation === "rel:has_team");
-    expect(drill).toBeTruthy();
-    expect(result.trace.notes?.some((n: string) => n.includes("Has team"))).toBe(true);
-  });
-
-  it("notes when no sub-question entities match any roster member — name-only degradation still researches", async () => {
-    // Neither sub-question's entity appears in teamsGroup's members (Bulls/Knicks/Lakers),
-    // so groundSubsWithRoster finds zero matches — chosen stays null — and must note the
-    // degradation instead of silently proceeding. The leaves still get researched by name
-    // (no pre-resolved node id survives), so graphSearch runs for the un-matched name.
-    const noMatchSubs = [
-      { question: "Boston Celtics attendance", entities: ["Boston Celtics"], metricFilters: ["attendance"] },
-      { question: "Miami Heat attendance", entities: ["Miami Heat"], metricFilters: ["attendance"] },
-    ];
-    h.plans[Q] = firstPass;
-    h.plans[`${Q}::groups`] = { atomic: false, rationale: "per member", entities: ["National Basketball Association"], metricFilters: ["attendance"], subQuestions: noMatchSubs };
-    h.overview = [teamsGroup];
-    const { graphSearch } = await import("./graph");
-    const result = await runTakoInitial(nbaReq, () => {});
-    expect(result.trace.notes?.some((n: string) => n.includes("no member names matched"))).toBe(true);
-    const searched = (graphSearch as any).mock.calls.map((c: any[]) => c[0]);
-    expect(searched).toContain("Boston Celtics"); // name-only degradation still researches
-  });
-
-  it("falls back to the answer-grounded path when the overview yields no cohort groups", async () => {
-    h.plans[Q] = firstPass;
-    h.overview = []; // no groups → roster null
-    h.answer = { answer: "The NBA's top teams include the Chicago Bulls.", cards: [] };
-    h.cohortMembers = { entities: ["Chicago Bulls"], rationale: "from answer" };
-    h.plans[`${Q}::members`] = { atomic: false, rationale: "per member", entities: ["National Basketball Association"], metricFilters: ["attendance"], subQuestions: memberSubs.slice(0, 2) };
-    const { generateStructured } = await import("../../llm");
-    await runTakoInitial(nbaReq, () => {});
-    const labels = (generateStructured as any).mock.calls.map((c: any[]) => c[0].label);
-    expect(labels).toContain("cohort-resolve"); // old path ran
+  it("takoAnswerEnabled:false leaves the sector cohorts unresolved (no /v1/answer)", async () => {
+    wirePlans();
+    const { takoAnswer } = await import("../../tako");
+    await runTakoInitial({ ...sectorReq, takoAnswerEnabled: false }, () => {});
+    expect(takoAnswer).not.toHaveBeenCalled();
   });
 });

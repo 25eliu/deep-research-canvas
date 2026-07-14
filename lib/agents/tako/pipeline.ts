@@ -136,6 +136,7 @@ export async function runResearchTree(
       // step, including those on pruned (0-finding) leaves the tree dropped.
       calls: ctx.calls,
       reasoning: ctx.reasoning,
+      ...(ctx.graphyTrace ? { graphy: ctx.graphyTrace } : {}),
       timings: { ...ctx.timings, total: 0 } as Timings,
     },
   };

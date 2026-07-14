@@ -37,6 +37,10 @@ export const zGraphyBlock = z.object({
   title: z.string().optional(),
   subtitle: z.string().optional(),
   config: zGraphyConfig,
+  // Stamped server-side AFTER the modeling attempt resolves (never trusted from the
+  // LLM): "modeled" = purpose-built from card contents, "fallback" = converted from
+  // the report's own validated chart block. Drives the provenance badge in the UI.
+  source: z.enum(["modeled", "fallback"]).optional(),
 });
 
 export const zTakoRef = z.object({

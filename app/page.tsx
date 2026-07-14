@@ -150,6 +150,8 @@ export default function Page() {
             pushStep({ t: "reasoning", nodeId: evt.nodeId, depth: evt.depth, question: evt.question, kind: evt.kind, rationale: evt.rationale, entities: evt.entities, subtype: evt.subtype, metrics: evt.metrics, subQuestions: evt.subQuestions });
           } else if (evt.type === "tako_call") {
             pushStep({ t: "tako", call: evt.call });
+          } else if (evt.type === "graphy") {
+            pushStep({ t: "graphy", info: evt.info });
           } else if (evt.type === "graph_call") {
             pushStep({ t: "graph", nodeId: evt.nodeId, call: evt.call });
           } else if (evt.type === "synthesis") {
@@ -249,9 +251,22 @@ export default function Page() {
   }, [patchActive]);
 
   // Write the live transform straight to the DOM — the fast path that skips React entirely.
+  // The dot grid lives on .stage (outside the transformed .scene), so it's kept in world
+  // space by hand: pan moves background-position, zoom scales the tile and the dot radius,
+  // and the dots fade out once the grid gets too dense to read.
   const applyTransform = useCallback((v: CanvasView) => {
     const el = sceneRef.current;
     if (el) el.style.transform = `translate(${v.x}px,${v.y}px) scale(${v.scale})`;
+    const st = stageRef.current;
+    if (st) {
+      const tile = 24 * v.scale;
+      const r = Math.max(0.75, 1.2 * v.scale);
+      const alpha = 0.15 * Math.min(1, Math.max(0, (tile - 6) / 6));
+      st.style.backgroundPosition = `${v.x}px ${v.y}px`;
+      st.style.backgroundSize = `${tile}px ${tile}px`;
+      st.style.backgroundImage =
+        `radial-gradient(circle at ${r}px ${r}px, rgba(26, 23, 18, ${alpha.toFixed(3)}) ${r}px, transparent 0)`;
+    }
     if (pctRef.current) pctRef.current.textContent = `${Math.round(v.scale * 100)}%`;
   }, []);
 

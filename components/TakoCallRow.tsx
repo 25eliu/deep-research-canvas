@@ -14,9 +14,12 @@ export default function TakoCallRow({ call, defaultOpen = false }: { call: TakoC
   const panelId = useId();
   const n = call.cards.length;
   const failed = !!call.error;
+  // A /v1/contents call pulls the real series (CSV) behind one already-found card —
+  // its "query" is the card title, and "N cards" would misread as a search result.
+  const isContents = call.endpoint === "/v1/contents";
 
   return (
-    <div className="tako-call">
+    <div className={`tako-call${isContents ? " contents-call" : ""}`}>
       <button
         type="button"
         className="tako-call-row"
@@ -26,9 +29,9 @@ export default function TakoCallRow({ call, defaultOpen = false }: { call: TakoC
       >
         <span className="tako-call-primary">
           <IconChevronRight className={`disclosure-chev${open ? " open" : ""}`} />
-          <span className="query" title={call.query}>&ldquo;{call.query}&rdquo;</span>
+          <span className="query" title={call.query}>{`“${call.query}”`}</span>
           <span className={`n-cards${failed ? " failed" : ""}`}>
-            {failed ? "failed" : `${n} card${n === 1 ? "" : "s"}`}
+            {failed ? "failed" : isContents ? "fetched data" : `${n} card${n === 1 ? "" : "s"}`}
           </span>
         </span>
         <span className="tako-call-meta">
@@ -36,7 +39,8 @@ export default function TakoCallRow({ call, defaultOpen = false }: { call: TakoC
           <span className="sep">·</span>
           <span>{call.effort}</span>
           <span className="sep">·</span>
-          <span>{call.ms}ms</span>
+          {/* cache reads cost no network round-trip — "cache" is more honest than "0ms" */}
+          <span>{call.cached ? "cache" : `${call.ms}ms`}</span>
         </span>
       </button>
       {open && (
