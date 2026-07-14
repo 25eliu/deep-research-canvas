@@ -1,17 +1,17 @@
 "use client";
+import {
+  ResponsiveContainer, LineChart, Line, BarChart, Bar,
+  XAxis, YAxis, CartesianGrid, Tooltip,
+} from "recharts";
 import type { AnswerBlock } from "@/lib/schema";
+import {
+  SERIES_COLORS, AXIS_TICK, GRID_STROKE, BASELINE_STROKE,
+  fmtNum, fmtTick, fmtXLabel, xAxisLayout, yAxisWidth, TOOLTIP_STYLES,
+} from "../charts/theme";
 
 type ComparisonBlock = Extract<AnswerBlock, { kind: "comparison" }>;
 
-// Categorical palette (colorblind-safe, Observable-10-derived). Index-stable so a
-// series keeps its color between renders.
-export const SERIES_COLORS = ["#4269d0", "#efb118", "#ff725c", "#6cc5b0", "#a463f2", "#9c6b4e"];
-
-const W = 560, H = 240, PAD = 34;
-
-function fmt(n: number): string {
-  return Math.abs(n) >= 1000 ? n.toLocaleString("en-US") : String(n);
-}
+export { SERIES_COLORS };
 
 // The union of x values is built in first-appearance order across series, which
 // zigzags when series are interleaved (A: 2022,2024; B: 2023). When every value
@@ -28,10 +28,14 @@ export function sortedDomain(xs: string[]): string[] {
   return xs;
 }
 
-// Multi-entity overlay built from REAL card series: shared x domain (union, in
-// first-appearance order), shared y scale, one color per entity, legend chips
-// carrying the latest value, optional insight line beneath.
-export default function ComparisonChart({ block }: { block: ComparisonBlock }) {
+// Multi-entity overlay built from REAL card series, on recharts: shared sorted x
+// domain, shared y scale, one fixed-order color per entity (index-stable so a
+// series keeps its color between renders), legend chips carrying the latest
+// value, hover tooltip, optional insight line beneath. Explicit `width` exists
+// for tests — jsdom can't measure ResponsiveContainer.
+export default function ComparisonChart({ block, width, height = 264 }: {
+  block: ComparisonBlock; width?: number; height?: number;
+}) {
   const rawXs: string[] = [];
   for (const s of block.series) for (const p of s.points) {
     const k = String(p.x);
@@ -40,11 +44,45 @@ export default function ComparisonChart({ block }: { block: ComparisonBlock }) {
   const xs = sortedDomain(rawXs);
   const ys = block.series.flatMap((s) => s.points.map((p) => p.y));
   if (!xs.length || !ys.length) return <div className="empty-note">no data</div>;
-  const max = Math.max(...ys, 0), min = Math.min(...ys, 0);
-  const span = max - min || 1;
-  const x = (i: number) => PAD + (i * (W - 2 * PAD)) / Math.max(xs.length - 1, 1);
-  const y = (v: number) => H - PAD - ((v - min) / span) * (H - 2 * PAD);
+
+  // One row per domain value; each series contributes its y under its label key.
+  const rows = xs.map((xv) => {
+    const row: Record<string, string | number> = { x: fmtXLabel(xv) };
+    for (const s of block.series) {
+      const p = s.points.find((pt) => String(pt.x) === xv);
+      if (p) row[s.label] = p.y;
+    }
+    return row;
+  });
+  const xl = xAxisLayout(rows.map((r) => String(r.x)));
   const asLines = block.series.every((s) => s.points.length >= 3);
+  const color = (i: number) => SERIES_COLORS[i % SERIES_COLORS.length];
+
+  // Children as an array, not a fragment — recharts scans direct children.
+  const parts = [
+    <CartesianGrid key="grid" vertical={false} stroke={GRID_STROKE} />,
+    <XAxis
+      key="x" dataKey="x" interval="preserveStartEnd" minTickGap={xl.angle ? 4 : 18}
+      angle={xl.angle} tick={{ ...AXIS_TICK, textAnchor: xl.textAnchor }}
+      height={xl.height} tickLine={false} axisLine={{ stroke: BASELINE_STROKE }}
+    />,
+    <YAxis
+      key="y" tick={AXIS_TICK} tickFormatter={fmtTick}
+      width={yAxisWidth(ys)} tickLine={false} axisLine={false}
+    />,
+    <Tooltip key="tip" {...TOOLTIP_STYLES} formatter={(v) => fmtNum(Number(v))} />,
+    ...block.series.map((s, i) => asLines
+      ? <Line
+          key={s.label} type="monotone" dataKey={s.label} stroke={color(i)} strokeWidth={2}
+          dot={{ r: 2.6, fill: "var(--surface)", stroke: color(i), strokeWidth: 1.5 }}
+          activeDot={{ r: 4.5 }} connectNulls isAnimationActive={false}
+        />
+      : <Bar key={s.label} dataKey={s.label} fill={color(i)} radius={[4, 4, 0, 0]} isAnimationActive={false} />),
+  ];
+  const margin = { top: 8, right: 12, bottom: 0, left: 0 };
+  const chart = asLines
+    ? <LineChart {...(width ? { width, height } : {})} data={rows} margin={margin}>{parts}</LineChart>
+    : <BarChart {...(width ? { width, height } : {})} data={rows} margin={margin} barCategoryGap="20%" barGap={2}>{parts}</BarChart>;
 
   return (
     <div className="report-comparison">
@@ -54,55 +92,17 @@ export default function ComparisonChart({ block }: { block: ComparisonBlock }) {
           const last = s.points[s.points.length - 1];
           return (
             <span key={s.label} className="comparison-chip">
-              <span className="comparison-swatch" style={{ background: SERIES_COLORS[i % SERIES_COLORS.length] }} />
+              <span className="comparison-swatch" style={{ background: color(i) }} />
               {s.label}
-              {last ? <strong>{fmt(last.y)}</strong> : null}
+              {last ? <strong>{fmtNum(last.y)}</strong> : null}
             </span>
           );
         })}
         {block.unit ? <span className="comparison-unit">{block.unit}</span> : null}
       </div>
-      <svg width="100%" viewBox={`0 0 ${W} ${H}`} role="img" aria-label={block.title || "comparison chart"}>
-        <line x1={PAD} y1={H - PAD} x2={W - PAD} y2={H - PAD} stroke="var(--line-strong, #ccc)" />
-        {asLines
-          ? block.series.map((s, si) => (
-              <g key={s.label}>
-                <polyline
-                  fill="none" stroke={SERIES_COLORS[si % SERIES_COLORS.length]} strokeWidth={2.2}
-                  strokeLinejoin="round" strokeLinecap="round"
-                  points={s.points.map((p) => `${x(xs.indexOf(String(p.x)))},${y(p.y)}`).join(" ")}
-                />
-                {s.points.map((p, i) => (
-                  <circle key={i} cx={x(xs.indexOf(String(p.x)))} cy={y(p.y)} r={2.8}
-                    fill="#fff" stroke={SERIES_COLORS[si % SERIES_COLORS.length]} strokeWidth={1.6}>
-                    <title>{`${s.label} ${p.x}: ${fmt(p.y)}`}</title>
-                  </circle>
-                ))}
-              </g>
-            ))
-          : xs.map((xv, xi) => {
-              const group = (W - 2 * PAD) / xs.length;
-              const bw = Math.max(4, (group - 10) / block.series.length);
-              return block.series.map((s, si) => {
-                const p = s.points.find((pt) => String(pt.x) === xv);
-                if (!p) return null;
-                const bx = PAD + xi * group + 5 + si * bw;
-                return (
-                  <rect key={`${s.label}-${xv}`} x={bx} y={y(p.y)} width={bw - 2}
-                    height={Math.max(0, H - PAD - y(p.y))} rx={2}
-                    fill={SERIES_COLORS[si % SERIES_COLORS.length]} opacity={0.9}>
-                    <title>{`${s.label} ${xv}: ${fmt(p.y)}`}</title>
-                  </rect>
-                );
-              });
-            })}
-        {xs.map((xv, i) => (
-          <text key={xv} x={asLines ? x(i) : PAD + (i + 0.5) * ((W - 2 * PAD) / xs.length)} y={H - PAD + 14}
-            fontSize={10} fill="var(--muted, #888)" textAnchor="middle">
-            {xv.slice(0, 7)}
-          </text>
-        ))}
-      </svg>
+      <div className="chart-frame" role="img" aria-label={block.title || "comparison chart"}>
+        {width ? chart : <ResponsiveContainer width="100%" height={height}>{chart}</ResponsiveContainer>}
+      </div>
       {block.insight ? <div className="comparison-insight">{block.insight}</div> : null}
     </div>
   );

@@ -6,7 +6,7 @@ import MiniChart from "./MiniChart";
 import TakoEmbed from "./TakoEmbed";
 import Markdown from "./Markdown";
 import AnswerReport from "./AnswerReport";
-import { IconChevron, IconExternal } from "./icons";
+import { IconChevron, IconExternal, IconSearch } from "./icons";
 
 // Re-exported for callers that still import NODE_W (kept for layout back-compat).
 export const NODE_W = 300;
@@ -85,7 +85,7 @@ export default function NodeCard({
   // The Tako search query that surfaced this finding card — shown so provenance is
   // visible on the canvas. (Synthesis/research nodes render their own searches line.)
   const foundVia = !isSynth && !isResearch && node.searches?.length
-    ? <div className="found-via" title="Tako search that returned this card">🔍 {node.searches[0]}</div>
+    ? <div className="found-via" title="Tako search that returned this card"><IconSearch />{node.searches[0]}</div>
     : null;
   // A Tako graph card carries the chart itself — its long text `summary` (the Tako
   // description) is redundant noise, so we only show summaries on non-graph cards.
@@ -133,7 +133,7 @@ export default function NodeCard({
                 : node.summary
                   ? <div className="synth-body"><Markdown text={node.summary} /></div>
                   : <div className="synth-body synth-pending">Synthesizing…</div>}
-              {node.searches?.length ? <div className="node-searches">🔍 {node.searches.join(" · ")}</div> : null}
+              {node.searches?.length ? <div className="node-searches"><IconSearch />{node.searches.join(" · ")}</div> : null}
               {node.sources?.length ? <SeeSources sources={node.sources} /> : null}
               {sources ? <div className="synth-sources">grounded in {sources} source{sources === 1 ? "" : "s"}</div> : null}
             </div>
@@ -148,7 +148,7 @@ export default function NodeCard({
               {node.summary
                 ? <div className="synth-body"><Markdown text={node.summary} compact /></div>
                 : <div className="synth-body synth-pending">Researching…</div>}
-              {node.searches?.length ? <div className="node-searches">🔍 {node.searches.join(" · ")}</div> : null}
+              {node.searches?.length ? <div className="node-searches"><IconSearch />{node.searches.join(" · ")}</div> : null}
               {node.sources?.length ? <SeeSources sources={node.sources} /> : null}
               {sources ? <div className="synth-sources">{sources} source{sources === 1 ? "" : "s"}</div> : null}
             </div>

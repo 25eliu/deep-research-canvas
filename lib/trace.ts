@@ -29,7 +29,7 @@ export interface TraceNodeView {
   kind: "branch" | "leaf" | "gap";
   rationale?: string;
   entities: string[]; // candidate entity names this (sub)question decomposed to
-  subtype?: string; // entity-class filter the planner chose for the graph searches
+  label?: string; // NER label the planner chose as the graph-search ranking boost
   metrics: string[]; // metric substring filters it targets
   graph: { entity: string; related: string[]; kind?: "entity" | "metric" }[]; // what the Tako graph actually resolved
   findingCount: number;
@@ -46,7 +46,7 @@ export interface TraceNodeView {
 
 // Live steps accumulated from streamed events before the authoritative trace lands.
 export type LiveStep =
-  | { t: "reasoning"; nodeId: string; depth: number; question: string; kind: "branch" | "leaf" | "gap"; rationale?: string; entities?: string[]; subtype?: string; metrics?: string[]; subQuestions?: string[] }
+  | { t: "reasoning"; nodeId: string; depth: number; question: string; kind: "branch" | "leaf" | "gap"; rationale?: string; entities?: string[]; label?: string; metrics?: string[]; subQuestions?: string[] }
   | { t: "tako"; call: TakoCallRecord }
   | { t: "graph"; nodeId: string; call: GraphCallRecord }
   | { t: "synth"; nodeId: string; phase: "start" | "end" }
@@ -92,7 +92,7 @@ export function buildTree(flat: TraceTreeNode[] | undefined): TraceNodeView[] {
     kind: n.kind,
     rationale: n.rationale,
     entities: n.entities ?? [],
-    subtype: n.subtype,
+    label: n.label,
     metrics: n.metrics ?? [],
     graph: n.graph ?? [],
     findingCount: n.findingCount,
@@ -135,7 +135,7 @@ export function stepsToDisplay(steps: LiveStep[] | undefined): TraceNodeView[] {
       const v = ensure(s.nodeId, s);
       v.depth = s.depth; v.question = s.question; v.kind = s.kind; v.rationale = s.rationale;
       if (s.entities?.length) v.entities = s.entities;
-      if (s.subtype) v.subtype = s.subtype;
+      if (s.label) v.label = s.label;
       if (s.metrics?.length) v.metrics = s.metrics;
     } else if (s.t === "tako") {
       const v = ensure(s.call.nodeId);

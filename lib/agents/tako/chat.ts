@@ -163,6 +163,10 @@ export async function runAnswerLane(
   const retrieved = retrieveNodes(req.canvasState, req.selection, req.message);
 
   emit?.({ type: "trace", stage: "gathering evidence" });
+  // The gather loop's tako calls and the synthesis brackets all key on CHAT_NODE,
+  // which has no research-tree entry — without a reasoning step the trace renders
+  // it as an "(unnamed step)". Name it with the user's question up front.
+  emit?.({ type: "reasoning", nodeId: CHAT_NODE, depth: 0, question: req.message, kind: "leaf" });
   let gathered: GatherOut;
   let t = Date.now();
   try {
@@ -211,6 +215,9 @@ export async function runAnswerLane(
       answerUsed: takoAnswerUsed,
       cards: gathered.answerCards,
       calls,
+      // No tree on this lane — this entry keeps the CHAT_NODE step named when the
+      // finalized trace rebuilds from calls + reasoning.
+      reasoning: [{ nodeId: CHAT_NODE, question: req.message, rationale: "" }],
       notes: [],
       groundedIn: {
         nodes: retrieved.map((n) => ({ id: n.id, title: n.title })),

@@ -33,20 +33,28 @@ function primaryKey(card: TakoCard): string {
   return card.cardId || card.webpageUrl || card.imageUrl || card.title;
 }
 
-// Every identity a card can be recognized by. Two cards that share ANY key are
-// the same finding: same cardId or the same chart embed (a re-publish under a new
-// cardId). We deliberately do NOT key on the normalized title — distinct cards
-// whose titles differ only by stopwords/punctuation (e.g. a quarterly vs annual
-// chart, or a combined vs per-entity comparison) would over-merge and drop real
-// evidence. webpageUrl is per-card (…/card/<cardId>/) so it adds nothing.
+function normalizeSource(source?: string): string {
+  return (source || "").trim().toLowerCase();
+}
+
+// Every identity a card can be recognized by. Two cards that share ANY key are the
+// same finding: same cardId, same chart embed, OR the same (normalized title +
+// source). The title+source key catches Tako's re-minted duplicates: the same series
+// fetched from near-synonym queries ("Nvidia revenue" / "Nvidia total revenue" / …)
+// comes back three times with the SAME title + source but a FRESH cardId + embedUrl
+// each time — cardId/embed dedup can't see it, so the board showed three copies of one
+// chart. It's SCOPED TO SOURCE (two providers of one series stay distinct) and keys on
+// the FULL normalized title, which for Tako cards encodes the timeframe/entity/scope
+// ("…(Quarterly)" vs "…(Annual)", per-entity vs combined) — so those stay apart, not
+// over-merged. webpageUrl is per-card (…/card/<cardId>/) so it adds nothing.
+// `collapseMetric` (title-only, source-agnostic) is a MORE aggressive opt-in, off by default.
 function dedupKeys(card: TakoCard, collapseMetric: boolean): string[] {
   const keys: string[] = [];
   if (card.cardId) keys.push(`card:${card.cardId}`);
   if (card.embedUrl) keys.push(`embed:${card.embedUrl}`);
-  if (collapseMetric) {
-    const sig = titleSignature(card.title);
-    if (sig) keys.push(`metric:${sig}`); // aggressive metric collapse — off by default
-  }
+  const sig = titleSignature(card.title);
+  if (sig) keys.push(`titlesrc:${sig}|${normalizeSource(card.source)}`);
+  if (collapseMetric && sig) keys.push(`metric:${sig}`); // aggressive metric collapse — off by default
   return keys;
 }
 

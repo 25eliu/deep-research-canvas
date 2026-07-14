@@ -46,13 +46,13 @@ export interface GraphyTraceInfo {
 // drill-down: the exact request params as sent and the (compacted) response items.
 export interface GraphCallRecord {
   endpoint: "graph/search" | "graph/related";
-  params: { q?: string; types?: string; subtype?: string; node_id?: string; relation_type?: string; relation?: string; limit?: number };
+  params: { q?: string; types?: string; label?: string; node_id?: string; relation_type?: string; relation?: string; limit?: number };
   // Display-only: the resolved node's NAME a related call was issued for (params carry
   // only the opaque node_id) — lets the trace label "Alphabet Inc. · q=revenue" instead
   // of a slug. Never part of the request; excluded from the copy/paste querystring.
   subject?: string;
   ms: number;
-  results: { id?: string; name: string; type?: string; subtype?: string; aliases?: string[]; description?: string }[];
+  results: { id?: string; name: string; type?: string; subtype?: string; label?: string; aliases?: string[]; description?: string }[];
   error?: string; // present (with results []) when the call failed
 }
 
@@ -67,7 +67,7 @@ export interface TraceTreeNode {
   queries?: string[]; // Tako search queries this node ran
   rationale?: string; // LLM reasoning that produced this node's plan
   entities?: string[]; // candidate entity names this (sub)question decomposed to (drive the graph searches)
-  subtype?: string; // entity-class filter the planner chose for the graph searches (one of the fixed graph classes)
+  label?: string; // NER label the planner chose as the graph-search ranking boost (one of the fixed labels)
   metrics?: string[]; // metric substring filters this (sub)question targets
   // What the Tako graph actually resolved for this node: each entity → the related
   // metric names the graph has for it (from graphSearch + graphRelated), plus an
@@ -138,7 +138,7 @@ export type AgentEvent =
       kind: "branch" | "leaf" | "gap";
       rationale?: string;
       entities?: string[]; // candidate entity names this (sub)question decomposed to
-      subtype?: string; // entity-class filter the planner chose (one of the fixed graph classes)
+      label?: string; // NER label the planner chose as the graph-search ranking boost (one of the fixed labels)
       metrics?: string[]; // metric substring filters it targets
       subQuestions?: string[]; // present when branching
     }

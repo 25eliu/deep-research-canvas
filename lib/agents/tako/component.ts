@@ -36,7 +36,7 @@ async function distillPlan(req: AgentRequest, historyText: string, notes: string
       return await generateStructured({
         provider: OPENAI, system: COMPONENT_DISTILL_SYSTEM,
         prompt: `${prompt}\n\nSCHEMA_REMINDER: Your previous response did not match the required schema.` +
-          ` Return { question, rationale, entities (1-3 candidate name strings), subtype?, metricFilters (1-5 short metric-name fragments) }.`,
+          ` Return { question, rationale, entities (1-3 candidate name strings), label?, metricFilters (1-5 short metric-name fragments) }.`,
         schema: zComponentPlan, label: "component-distill",
       });
     } catch (e2: unknown) {
@@ -80,12 +80,12 @@ export async function runComponentLane(
   const nodeId = uniqueResearchId(ctx, plan.question);
   const lookup: GraphLookup = {
     entities: plan.entities,
-    ...(plan.subtype ? { subtype: plan.subtype } : {}),
+    ...(plan.label ? { label: plan.label } : {}),
     metricFilters: plan.metricFilters,
   };
   emit?.({
     type: "reasoning", nodeId, depth: 1, question: plan.question, kind: "leaf",
-    rationale: plan.rationale, entities: lookup.entities, subtype: lookup.subtype, metrics: lookup.metricFilters,
+    rationale: plan.rationale, entities: lookup.entities, label: lookup.label, metrics: lookup.metricFilters,
   });
 
   const result = await researchLeaf(plan.question, 1, nodeId, false, ctx, lookup, plan.rationale);

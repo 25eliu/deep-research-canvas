@@ -39,6 +39,27 @@ function GraphEntity({ entity, related, kind }: { entity: string; related: strin
 // it reveals the LLM's rationale, the Tako calls this node issued (each drillable
 // to its cards), a synthesis line, and its child nodes (recursively). Children are
 // drawn under a ruled connector rail echoing the canvas `feeds` edges.
+// The graph fan-out issues its related calls in concurrency batches, so they arrive
+// interleaved across entities. For readability the drill-down keeps searches in issue
+// order, then groups every related call under its entity (first-appearance order) —
+// each node's filters read consecutively ("Alphabet Inc." q=revenue, q=sales, …).
+function fmtMs(ms: number): string {
+  return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`;
+}
+
+function orderGraphCalls(calls: TraceNodeView["graphCalls"]): TraceNodeView["graphCalls"] {
+  const searches = calls.filter((c) => c.endpoint === "graph/search");
+  const related = calls.filter((c) => c.endpoint !== "graph/search");
+  const bySubject = new Map<string, typeof related>();
+  for (const c of related) {
+    const key = c.subject ?? c.params.node_id ?? "";
+    const group = bySubject.get(key) ?? [];
+    group.push(c);
+    bySubject.set(key, group);
+  }
+  return [...searches, ...[...bySubject.values()].flat()];
+}
+
 export default function TraceNode({ node, defaultOpen }: { node: TraceNodeView; defaultOpen?: boolean }) {
   const initial = defaultOpen ?? (node.kind === "branch" && node.depth <= 0);
   const [open, setOpen] = useState(initial);
@@ -47,6 +68,9 @@ export default function TraceNode({ node, defaultOpen }: { node: TraceNodeView; 
   // in-flight times, so their sum ≈ the actual elapsed the user waited).
   const totalMs = node.calls.reduce((s, c) => s + c.ms, 0);
   const totalLabel = totalMs >= 1000 ? `${(totalMs / 1000).toFixed(1)}s` : `${totalMs}ms`;
+  // The node's whole wall-clock (decompose + graph + searches + synth; branches span
+  // their subtree) — stamped server-side, so it's absent on live/legacy traces.
+  const nodeLabel = node.totalMs != null ? fmtMs(node.totalMs) : null;
 
   return (
     <div className="trace-node">
@@ -60,6 +84,7 @@ export default function TraceNode({ node, defaultOpen }: { node: TraceNodeView; 
         <IconChevronRight className={`disclosure-chev${open ? " open" : ""}`} />
         <span className="q">{node.question || "(unnamed step)"}</span>
         {(node.kind === "gap" || node.gapFill) && <span className="trace-gap-chip">gap fill</span>}
+        {nodeLabel && <span className="trace-node-ms" title="total wall-clock for this step (including sub-steps)">{nodeLabel}</span>}
         {node.findingCount > 0 && <span className="trace-node-count">{node.findingCount}</span>}
       </button>
 
@@ -67,9 +92,10 @@ export default function TraceNode({ node, defaultOpen }: { node: TraceNodeView; 
         <div id={panelId} role="group" aria-label={node.question}>
           {node.rationale && <div className="trace-rationale">{node.rationale}</div>}
 
-          {(node.entities.length > 0 || node.metrics.length > 0) && (
+          {(node.entities.length > 0 || node.metrics.length > 0 || node.label) && (
             <div className="trace-decomp">
               {node.entities.map((e) => <span key={`e-${e}`} className="decomp-chip entity">{e}</span>)}
+              {node.label && <span className="decomp-chip subtype" title="NER label — graph-search ranking boost">{node.label}</span>}
               {node.metrics.map((m) => <span key={`m-${m}`} className="decomp-chip metric">{m}</span>)}
             </div>
           )}
@@ -86,7 +112,7 @@ export default function TraceNode({ node, defaultOpen }: { node: TraceNodeView; 
               {node.graphCalls.length > 0 && (
                 <>
                   <div className="trace-graph-label graph-calls-label">graph calls</div>
-                  {node.graphCalls.map((c, i) => <GraphCallRow key={`gc-${i}`} call={c} />)}
+                  {orderGraphCalls(node.graphCalls).map((c, i) => <GraphCallRow key={`gc-${i}`} call={c} />)}
                 </>
               )}
             </div>
@@ -98,11 +124,11 @@ export default function TraceNode({ node, defaultOpen }: { node: TraceNodeView; 
             <div className="trace-node-total">{node.calls.length} search{node.calls.length === 1 ? "" : "es"} · {totalLabel} total</div>
           )}
 
-          {(node.synthesizing || node.findingCount > 0) && (
+          {(node.synthesizing || node.findingCount > 0 || node.composeMs != null) && (
             <div className="trace-synth-line">
               {node.synthesizing
                 ? <>synthesizing…</>
-                : <>synthesis · grounded in {node.findingCount} finding{node.findingCount === 1 ? "" : "s"}</>}
+                : <>synthesis · grounded in {node.findingCount} finding{node.findingCount === 1 ? "" : "s"}{node.composeMs != null ? <> · {fmtMs(node.composeMs)}</> : null}</>}
             </div>
           )}
 

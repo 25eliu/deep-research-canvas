@@ -54,7 +54,7 @@ export function newSession(): Session {
     state: { nodes: [], edges: [] },
     messages: [],
     provider: "tako",
-    takoAnswer: false,
+    takoAnswer: true,
     graphy: false,
     view: { x: 0, y: 0, scale: 1 },
   };

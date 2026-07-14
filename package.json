@@ -2,6 +2,10 @@
   "name": "canvas-tako",
   "version": "0.1.0",
   "private": true,
+  "description": "Spatial research canvas demo for the Tako API: chat-driven board of cited data cards with swappable gpt/claude/tako providers.",
+  "license": "MIT",
+  "author": "Tako",
+  "homepage": "https://tako.com",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
@@ -18,6 +22,7 @@
     "next": "14.2.5",
     "react": "18.3.1",
     "react-dom": "18.3.1",
+    "recharts": "^2.15.4",
     "zod": "^3.25.76"
   },
   "devDependencies": {

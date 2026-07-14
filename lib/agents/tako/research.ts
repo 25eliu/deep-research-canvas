@@ -8,14 +8,12 @@ import type { TakoCallRecord, GraphCallRecord } from "../shared/types";
 import { generateStructured, streamAnswer } from "../../llm";
 import { zResearchPlan, zCohortMembers, type GraphLookup } from "../shared/schemas";
 import { takoAnswer, type TakoCard } from "../../tako";
-import type { Finding } from "./findings";
-import type { CohortRoster, RosterGroup, RosterMember } from "./strategy";
 import {
   DECOMPOSE_SYSTEM, BRANCH_SYNTH_SYSTEM, COHORT_RESOLVE_SYSTEM,
 } from "./prompts";
 import {
-  SYNTH_ID, synthNode, researchNode, derivedEdge, toNodeSources, extractFigures,
-  runSearches, firstSentence, researchLeaf, uniqueResearchId,
+  SYNTH_ID, synthNode, researchNode, derivedEdge, toNodeSources,
+  firstSentence, researchLeaf, uniqueResearchId,
   type ResearchCtx, type ResearchResult,
 } from "./flow";
 
@@ -101,21 +99,27 @@ const ANSWER_EXCERPT = 3000; // chars of the tako answer prose handed to decompo
 
 export interface GroundedAnswer { answer: string; cards: TakoCard[] }
 
-// Ground a question with a real tako answer (/v1/answer prose + cards) so the
-// DECOMPOSE prompt can plan from up-to-date evidence. Called lazily, ONLY when the
-// planner asked for fresh context (needsFreshContext) or cohort resolution needs a
-// fallback — never unconditionally. The result feeds the decompose prompt alone
+// Ground a question with a real WEB-sourced tako answer (/v1/answer with sources.web
+// → current-article prose + web cards) so the DECOMPOSE prompt / cohort resolver can
+// plan from up-to-date evidence. Called lazily, ONLY when the planner asked for fresh
+// context (needsFreshContext) or the plan is a cohort — never unconditionally. Web is
+// deliberate: the whole point of grounding is to discover the real sub-question
+// subjects (a cohort's member companies) from CURRENT articles, not from whatever
+// entity happens to hold a structured card. The result feeds the decompose prompt alone
 // (GROUNDED_ANSWER + CARD_TITLES); its cards are NOT noded onto the board — the
 // synthesis node's evidence comes from the research tree, not from planning aids.
 // Returns null on ANY failure or when the answer came back empty — grounding may
 // never kill the turn.
-async function groundWithAnswer(ctx: ResearchCtx, question: string): Promise<GroundedAnswer | null> {
+async function groundWithAnswer(ctx: ResearchCtx, question: string, nodeId: string = ctx.rootId): Promise<GroundedAnswer | null> {
   ctx.emit?.({ type: "trace", stage: "grounding the research plan via tako answer" });
   try {
     const t0 = Date.now();
-    const { answer, cards } = await takoAnswer(question, { effort: "fast" });
+    // web:true — grounding must plan from CURRENT ARTICLES, not the structured-data
+    // default (which over-weights whatever entity holds a Tako card and mis-grounds
+    // cohort discovery). See takoAnswer's web note.
+    const { answer, cards } = await takoAnswer(question, { effort: "fast", web: true });
     const call: TakoCallRecord = {
-      callId: `${ctx.rootId}:answer:${ctx.calls.length}`, nodeId: ctx.rootId,
+      callId: `${nodeId}:answer:${ctx.calls.length}`, nodeId,
       query: question, endpoint: "/v1/answer", effort: "fast", ms: Date.now() - t0,
       cards: cards.map((c) => ({ id: c.cardId!, title: c.title, source: c.source, url: c.webpageUrl || c.embedUrl })),
     };
@@ -166,57 +170,9 @@ async function resolveCohort(ctx: ResearchCtx, question: string, cohort: string,
 interface ResearchOpts { root: boolean; lookup?: GraphLookup; siblings?: string[] }
 
 // Normalize a plan/sub-question's lookup fields into the pipeline's GraphLookup shape
-// (subtype null → undefined; the schema guarantees the arrays are 1-3 non-empty strings).
-function toLookup(p: { entities: string[]; subtype?: string | null; metricFilters: string[] }): GraphLookup {
-  return { entities: p.entities, ...(p.subtype ? { subtype: p.subtype } : {}), metricFilters: p.metricFilters };
-}
-
-// CI match of a sub-question's candidate entities against a roster member's
-// name/aliases — how LLM-returned verbatim names become node ids (the LLM never
-// sees or emits ids; an unmatched name survives as a plain name-only lookup).
-function matchMember(entities: string[], groups: RosterGroup[]): { member: RosterMember; group: RosterGroup } | null {
-  const wanted = entities.map((e) => e.trim().toLowerCase());
-  for (const group of groups) {
-    for (const member of group.members) {
-      const names = [member.name, ...member.aliases].map((s) => s.trim().toLowerCase());
-      if (wanted.some((w) => w && names.includes(w))) return { member, group };
-    }
-  }
-  return null;
-}
-
-// Attach roster node ids to the second-pass subs (new objects — no mutation),
-// infer the chosen group (most member matches; tie → overview order), and drill
-// the full roster into a note when the group is bigger than its inline members.
-async function groundSubsWithRoster(
-  ctx: ResearchCtx, subs: { question: string; lookup: GraphLookup }[], roster: CohortRoster,
-): Promise<{ question: string; lookup: GraphLookup }[]> {
-  const matches = new Map<string, number>();
-  const grounded = subs.map((s) => {
-    const hit = matchMember(s.lookup.entities, roster.groups);
-    if (!hit) return s;
-    matches.set(hit.group.key, (matches.get(hit.group.key) ?? 0) + 1);
-    return { ...s, lookup: { ...s.lookup, node: { id: hit.member.id, name: hit.member.name } } };
-  });
-  let chosen: RosterGroup | null = null;
-  for (const g of roster.groups) {
-    const n = matches.get(g.key) ?? 0;
-    if (n > 0 && n > (chosen ? matches.get(chosen.key) ?? 0 : 0)) chosen = g;
-  }
-  if (chosen) {
-    ctx.notes.push(`cohort grounded to graph group "${chosen.label}" (${chosen.totalCapped ? ">" : ""}${chosen.total} members) on ${roster.anchor.name}`);
-    if (chosen.total > chosen.members.length) {
-      try {
-        const full = await roster.expand(chosen.key);
-        if (full.length) ctx.notes.push(`full "${chosen.label}" roster (${full.length}): ${full.slice(0, 40).map((m) => m.name).join(", ")}`);
-      } catch (e: unknown) {
-        ctx.notes.push(`cohort roster drill failed — ${errorMessage(e)}`);
-      }
-    }
-  } else if (roster.groups.length > 0) {
-    ctx.notes.push(`cohort roster fetched but no member names matched the sub-questions — proceeding name-only`);
-  }
-  return grounded;
+// (label null → undefined; the schema guarantees the arrays are 1-3 non-empty strings).
+function toLookup(p: { entities: string[]; label?: string | null; metricFilters: string[] }): GraphLookup {
+  return { entities: p.entities, ...(p.label ? { label: p.label } : {}), metricFilters: p.metricFilters };
 }
 
 export async function research(question: string, depth: number, ctx: ResearchCtx, opts: ResearchOpts): Promise<ResearchResult> {
@@ -228,11 +184,10 @@ export async function research(question: string, depth: number, ctx: ResearchCtx
   // ---- decide: branch or leaf ----
   let atomic = true;
   // Each (sub-)question carries a validated entity-first lookup (candidate names +
-  // optional subtype + metric substring filters).
+  // optional NER label + metric substring filters).
   let subs: { question: string; lookup: GraphLookup }[] = [];
   let lookup: GraphLookup = opts.lookup ?? { entities: [], metricFilters: [] };
   let rationale: string | undefined; // the LLM's reasoning for this node's plan
-  let cohortGraphCalls: GraphCallRecord[] = []; // roster's graph calls → root tree entry (trace drill-down)
   const canBranch = depth < MAX_DEPTH && ctx.budget.researchNodes < ctx.budget.maxNodes;
   if (canBranch) {
     const maxChildren = MAX_CHILDREN;
@@ -240,7 +195,7 @@ export async function research(question: string, depth: number, ctx: ResearchCtx
     // (the model sometimes re-splits a sub-question into itself + an invented sibling)
     // or rewords an earlier sibling is dropped; if fewer than 2 genuine subs remain,
     // the node stays a leaf.
-    const toSubs = (plan: { subQuestions?: { question: string; entities: string[]; subtype?: string | null; metricFilters: string[] }[] }) => {
+    const toSubs = (plan: { subQuestions?: { question: string; entities: string[]; label?: string | null; metricFilters: string[] }[] }) => {
       const kept: { question: string; lookup: GraphLookup }[] = [];
       for (const s of plan.subQuestions ?? []) {
         if (kept.length >= maxChildren) break;
@@ -259,6 +214,10 @@ export async function research(question: string, depth: number, ctx: ResearchCtx
     // its result feeds a decompose re-plan, nothing else. Gated by the same
     // takoAnswerEnabled kill-switch as the follow-up path.
     const canGround = root && ctx.req.takoAnswerEnabled !== false;
+    // Cohort resolution grounds at ANY depth (the multi-sector example splits into
+    // per-sector sub-questions, each itself a cohort) — so its grounding gate is NOT
+    // root-scoped, only the takoAnswerEnabled kill-switch.
+    const canGroundCohort = ctx.req.takoAnswerEnabled !== false;
     let grounded: GroundedAnswer | null = null;
     // A lazy grounding /v1/answer call would stream before this node's reasoning
     // step exists and mint an "(unnamed step)" in the live trace — seed the step
@@ -280,7 +239,12 @@ export async function research(question: string, depth: number, ctx: ResearchCtx
       // validation failure — observed with cohort questions omitting the required
       // lookup fields). One corrective retry with the violation named keeps a
       // flubbed plan from degrading the whole turn to an empty board.
+      // lastExtra survives across calls so LATER retries (the split-intent CORRECTION
+      // below) keep the cohort's COHORT_MEMBERS block — without it a correction was
+      // asked to produce per-member subs WITHOUT the member list and reliably failed.
+      let lastExtra = "";
       const decomposeCall = async (extra = "") => {
+        lastExtra = extra;
         try {
           return await generateStructured({
             provider: OPENAI, system: decomposePrompt(maxChildren, depth),
@@ -294,16 +258,15 @@ export async function research(question: string, depth: number, ctx: ResearchCtx
             prompt: `${basePrompt()}${extra}\n\nSCHEMA_REMINDER: Your previous response did not match the required schema.` +
               ` EVERY plan must include entities (1-3 candidate name strings — for a class question use the class` +
               ` phrase and/or the question's geography/market) AND metricFilters (1-5 short metric-name fragments),` +
-              ` plus atomic and rationale; each subQuestion carries the same entities/subtype/metricFilters fields.`,
+              ` plus atomic and rationale; each subQuestion carries the same entities/label/metricFilters fields.`,
             schema: zResearchPlan, label: "decompose",
           });
         }
       };
       let plan = await decomposeCall();
       // The planner decided the split depends on CURRENT data (live drivers, moving
-      // rankings): ground with a real tako answer and re-plan from it. Cohort plans
-      // skip this — their second pass grounds via the graph roster (or the lazy
-      // answer fallback below).
+      // rankings): ground with a real tako answer and re-plan from it. Root-only, and
+      // cohort plans skip it — a cohort grounds via its own answer resolution below.
       if (canGround && plan.needsFreshContext && !plan.cohort) {
         seedTraceStep();
         grounded = await groundWithAnswer(ctx, question);
@@ -315,42 +278,29 @@ export async function research(question: string, depth: number, ctx: ResearchCtx
           }
         }
       }
-      // Class-of-entities question: FIRST try the graph — the anchor's relation
-      // groups enumerate real members with node ids (exhaustive, un-hallucinatable).
-      // Fall back to extracting members from the grounded answer's prose only when
-      // the graph has nothing (no anchor node, no cohort-shaped groups, provider
-      // without a graph). Root-only; a failed second pass keeps the FIRST plan.
-      let roster: CohortRoster | null = null;
-      if (root && plan.cohort) {
-        roster = plan.entities?.length
-          ? (await ctx.strategy.cohortRoster?.(ctx, plan.cohort, toLookup(plan), nodeId)) ?? null
-          : null;
-        if (roster) cohortGraphCalls = roster.graphCalls;
-        if (roster) {
-          const promptGroups = roster.groups.map((g) => ({
-            label: g.label, total: g.totalCapped ? `>${g.total}` : g.total,
-            members: g.members.map((m) => m.name),
-          }));
+      // Class-of-entities question (INCLUDING a sector/industry in a region): the
+      // members are unknowable from the question text, so resolve them from a real
+      // Tako answer (prose + card titles) and re-decompose one sub-question per member.
+      // Runs at ANY depth — the multi-sector example splits into per-sector
+      // sub-questions, each itself a cohort resolved on its OWN node. A failed second
+      // pass keeps the FIRST plan; the answer call attaches to THIS node's trace.
+      let cohortMembers: string[] | null = null; // resolved member names — powers the deterministic split fallback below
+      let cohortFilters: string[] = []; // the cohort plan's own measure fragments (the fallback subs reuse them)
+      let cohortLabel: string | undefined; // NER label boost from the cohort plan, if it set one
+      if (plan.cohort && canGroundCohort) {
+        if (!grounded) {
+          seedTraceStep();
+          grounded = await groundWithAnswer(ctx, question, nodeId);
+        }
+        cohortFilters = plan.metricFilters ?? [];
+        cohortLabel = plan.label?.trim() || undefined;
+        const members = grounded ? await resolveCohort(ctx, question, plan.cohort, grounded) : null;
+        if (members?.length) {
+          cohortMembers = members;
           try {
-            plan = await decomposeCall(`\n\nCOHORT_GROUPS: ${JSON.stringify(promptGroups)}`);
+            plan = await decomposeCall(`\n\nCOHORT_MEMBERS: ${JSON.stringify(members)}`);
           } catch (e: unknown) {
-            roster = null; // second pass failed — don't ground subs against it
-            ctx.notes.push(`cohort graph second-pass decompose failed — proceeding with the first plan (${errorMessage(e).slice(0, 80)})`);
-          }
-        } else if (canGround) {
-          // Graph roster missed — lazily ground with a real answer and extract the
-          // members from its prose (the only remaining source of real member names).
-          if (!grounded) {
-            seedTraceStep();
-            grounded = await groundWithAnswer(ctx, question);
-          }
-          const members = grounded ? await resolveCohort(ctx, question, plan.cohort, grounded) : null;
-          if (members?.length) {
-            try {
-              plan = await decomposeCall(`\n\nCOHORT_MEMBERS: ${JSON.stringify(members)}`);
-            } catch (e: unknown) {
-              ctx.notes.push(`cohort second-pass decompose failed — proceeding with the first plan (${errorMessage(e).slice(0, 80)})`);
-            }
+            ctx.notes.push(`cohort second-pass decompose failed — proceeding with the first plan (${errorMessage(e).slice(0, 80)})`);
           }
         }
       }
@@ -358,7 +308,9 @@ export async function research(question: string, depth: number, ctx: ResearchCtx
       // cohort on a question that names its own subjects): a silent leaf here left
       // the gap round doing the real research. Re-plan ONCE from the question text;
       // adopt the re-plan only when it's usable (a real split or a concrete lookup).
-      if (plan.cohort && toSubs(plan).length === 0) {
+      // Resolved cohorts never take this path — their fallback is the deterministic
+      // per-member split below, and this message would be untrue for them.
+      if (plan.cohort && !cohortMembers && toSubs(plan).length === 0) {
         ctx.notes.push(`cohort "${plan.cohort.slice(0, 50)}" could not be resolved — re-planning from the question text`);
         try {
           const replanned = await decomposeCall(
@@ -372,7 +324,23 @@ export async function research(question: string, depth: number, ctx: ResearchCtx
         }
       }
       subs = toSubs(plan);
-      if (roster && subs.length) subs = await groundSubsWithRoster(ctx, subs, roster);
+      // Deterministic cohort fallback: the members are ALREADY resolved, so a
+      // per-member split is mechanical — never let a flubbed second-pass response
+      // (split rationale, missing/short subQuestions — the observed "two concrete
+      // companies to research one-by-one" leaf) collapse a resolved cohort. Built in
+      // code from real member names: no extra LLM round-trip, un-hallucinatable.
+      if (cohortMembers && cohortMembers.length >= 2 && subs.length < 2) {
+        ctx.notes.push(`cohort second pass returned ${subs.length} usable sub-questions — split rebuilt deterministically from ${cohortMembers.length} resolved members`);
+        subs = cohortMembers.slice(0, maxChildren).map((m) => ({
+          question: `${m}: ${question}`,
+          lookup: {
+            entities: [m],
+            ...(cohortLabel ? { label: cohortLabel } : {}),
+            metricFilters: cohortFilters.length ? cohortFilters : lookup.metricFilters,
+          },
+        }));
+        plan = { ...plan, atomic: false };
+      }
       // Split-intent guard: a plan that DECLARES a split (atomic:false, no cohort signal)
       // but returns no/1 sub-questions would silently collapse to a leaf — the observed
       // "What's driving inflation?" failure. One corrective retry naming the violation;
@@ -384,9 +352,11 @@ export async function research(question: string, depth: number, ctx: ResearchCtx
         try {
           const corrected = await generateStructured({
             provider: OPENAI, system: decomposePrompt(maxChildren, depth),
-            prompt: `${basePrompt()}\n\nCORRECTION: Your previous plan set atomic:false ("${plan.rationale.slice(0, 200)}")` +
+            // lastExtra keeps any COHORT_MEMBERS/COHORT_GROUPS block in the correction —
+            // without it the retry can't name the members its subs must cover.
+            prompt: `${basePrompt()}${lastExtra}\n\nCORRECTION: Your previous plan set atomic:false ("${plan.rationale.slice(0, 200)}")` +
               ` but returned ${plan.subQuestions?.length ?? 0} subQuestions, which is INVALID. Return the split's` +
-              ` subQuestions (2 to ${maxChildren}, one per facet, each with its own entities/subtype/metricFilters,` +
+              ` subQuestions (2 to ${maxChildren}, one per facet, each with its own entities/label/metricFilters,` +
               ` each question different from the RESEARCH_QUESTION itself) — or atomic:true if the question` +
               ` genuinely is one subject + one measure.`,
             schema: zResearchPlan, label: "decompose",
@@ -409,9 +379,8 @@ export async function research(question: string, depth: number, ctx: ResearchCtx
       atomic = subs.length < 2;
       rationale = plan.rationale;
       // Adopt the child plan's own lookup — but PRESERVE a parent-assigned pre-resolved
-      // node (cohort-roster member id): the child re-words candidate names for the SAME
-      // one subject, and dropping the id would silently resurrect entity search for
-      // every roster member (real decomposes always return entities; mocks didn't).
+      // node id when one was passed down: the child re-words candidate names for the
+      // SAME one subject, and dropping the id would silently resurrect entity search.
       if (plan.entities?.length) {
         lookup = { ...toLookup(plan), ...(opts.lookup?.node ? { node: opts.lookup.node } : {}) };
       }
@@ -423,6 +392,11 @@ export async function research(question: string, depth: number, ctx: ResearchCtx
 
   const willBranch = !atomic && subs.length >= 2
     && ctx.budget.researchNodes + subs.length <= ctx.budget.maxNodes;
+  // A valid split suppressed ONLY by budget must be visible in the trace — otherwise
+  // a budget-leaf is indistinguishable from a failed decompose when debugging.
+  if (!atomic && subs.length >= 2 && !willBranch) {
+    ctx.notes.push(`split of ${subs.length} suppressed — research budget exhausted (${ctx.budget.researchNodes}/${ctx.budget.maxNodes})`);
+  }
 
   // Live reasoning step: one per research node, once the branch/leaf decision is final.
   ctx.emit?.({
@@ -430,7 +404,7 @@ export async function research(question: string, depth: number, ctx: ResearchCtx
     kind: willBranch ? "branch" : "leaf",
     rationale,
     entities: lookup.entities.length ? lookup.entities : undefined,
-    subtype: lookup.subtype,
+    label: lookup.label,
     metrics: lookup.metricFilters.length ? lookup.metricFilters : undefined,
     subQuestions: willBranch ? subs.map((s) => s.question) : undefined,
   });
@@ -458,18 +432,17 @@ export async function research(question: string, depth: number, ctx: ResearchCtx
 
   ctx.push(live.map((k) => derivedEdge(k.nodeId!, nodeId))); // children feed this node
 
-  // The overarching (root) agent owns the BROAD view: it fetches the overview data
-  // itself so sub-agents don't each re-fetch the general graph.
   const children = live.map((k) => k.nodeId!);
 
-  // Root: fetch the broad view, then DEFER — the composed answer report (Claude,
-  // at the end) is the answer; no streamed root prose.
+  // Root: the synthesis node does NO graph resolving or searching of its own — that
+  // is what makes it DIFFERENT from every research node. Its children own the
+  // per-facet data, the gap round fetches anything still missing, and the composed
+  // answer report (at the end) is the answer; a root "broad fetch" only re-found
+  // series the leaves already had. DEFER — no streamed root prose either.
   if (root) {
     ctx.push([{ op: "add_node", node: synthNode(ctx.rootId, "", "") }]);
-    const bf = await broadFetch(question, nodeId, ctx, lookup);
-    ctx.figures.push(...extractFigures(bf.findings));
-    ctx.tree.push({ nodeId, depth, question, kind: "branch", findingCount: bf.findings.length, children, queries: bf.queries, rationale, entities: lookup.entities, subtype: lookup.subtype, metrics: bf.metrics ?? lookup.metricFilters, graph: bf.graph, calls: bf.calls, graphCalls: [...cohortGraphCalls, ...(bf.graphCalls ?? [])], graphMs: bf.graphMs, totalMs: Date.now() - startedAt });
-    return { nodeId, title: question, synthesis: "", findingCount: bf.findings.length, children, depth, kind: "branch" };
+    ctx.tree.push({ nodeId, depth, question, kind: "branch", findingCount: 0, children, rationale, entities: lookup.entities, label: lookup.label, metrics: lookup.metricFilters, graphCalls: [], totalMs: Date.now() - startedAt });
+    return { nodeId, title: question, synthesis: "", findingCount: 0, children, depth, kind: "branch" };
   }
 
   // Non-root branch: reconcile its children's mini-answers into a sub-answer.
@@ -495,19 +468,6 @@ export async function research(question: string, depth: number, ctx: ResearchCtx
     summary: prose, title: question,
     ...(branchSources.length ? { sources: branchSources } : {}),
   } }]);
-  ctx.tree.push({ nodeId, depth, question, kind: "branch", findingCount: 0, children, rationale, entities: lookup.entities, subtype: lookup.subtype, metrics: lookup.metricFilters, totalMs: Date.now() - startedAt });
+  ctx.tree.push({ nodeId, depth, question, kind: "branch", findingCount: 0, children, rationale, entities: lookup.entities, label: lookup.label, metrics: lookup.metricFilters, totalMs: Date.now() - startedAt });
   return { nodeId, title: question, synthesis: prose, findingCount: 0, children, depth, kind: "branch", claim, confidence: 0.75 };
-}
-
-// The root's broad/overview fetch: 1-2 high-level queries whose cards attach to
-// the synth node, so the overarching answer is grounded in the general view.
-async function broadFetch(
-  question: string, nodeId: string, ctx: ResearchCtx, lookup: GraphLookup,
-): Promise<{ findings: Finding[]; queries: string[]; calls: TakoCallRecord[]; graph: { entity: string; related: string[] }[]; metrics?: string[]; graphCalls?: GraphCallRecord[]; graphMs?: number }> {
-  const { queries, graph, metrics: planMetrics, graphCalls, graphMs } = await ctx.strategy.broadQueries(ctx, question, lookup, nodeId);
-  ctx.queries.push(...queries);
-
-  // Broad chart cards feed the synth; broad web sources are filtered into ctx.webSources.
-  const { dataFindings, calls } = await runSearches(question, nodeId, queries, ctx);
-  return { findings: dataFindings, queries, calls, graph, metrics: planMetrics, graphCalls, graphMs };
 }

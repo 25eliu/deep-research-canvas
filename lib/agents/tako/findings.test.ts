@@ -40,20 +40,41 @@ describe("FindingLedger", () => {
     expect(l.size).toBe(1);
   });
 
-  it("does NOT merge distinct cards that share a normalized title (title is not a dedup key)", () => {
+  it("merges same-title + same-source cards even when cardId/embed differ (Tako re-mints ids per search)", () => {
     const l = new FindingLedger();
-    // Different cardId AND different embed → genuinely distinct evidence, kept both.
-    expect(l.add(card({ cardId: "a", title: "Nvidia Revenue (Quarterly)", embedUrl: "https://e/a" }))).not.toBeNull();
-    expect(l.add(card({ cardId: "b", title: "nvidia revenue quarterly", embedUrl: "https://e/b" }))).not.toBeNull();
+    // The real duplicate pattern (verified on staging): three near-synonym queries
+    // ("Nvidia revenue", "Nvidia total revenue", "Nvidia revenue growth") each return
+    // the SAME series — "NVIDIA … Total Revenues (Annual)" / Fiscal.ai — under a fresh
+    // cardId + embedUrl. They must collapse to ONE knowledge card.
+    expect(l.add(card({ cardId: "a", title: "NVIDIA Corporation Total Revenues (Normalized) (Annual)", source: "Fiscal.ai", embedUrl: "https://e/a" }))).not.toBeNull();
+    expect(l.add(card({ cardId: "b", title: "NVIDIA Corporation Total Revenues (Normalized) (Annual)", source: "Fiscal.ai", embedUrl: "https://e/b" }))).toBeNull();
+    // punctuation/case-only difference still collapses (title signature is normalized)
+    expect(l.add(card({ cardId: "c", title: "nvidia corporation total revenues normalized annual", source: "Fiscal.ai", embedUrl: "https://e/c" }))).toBeNull();
+    expect(l.size).toBe(1);
+  });
+
+  it("keeps same-title cards from DIFFERENT sources (two providers of one series)", () => {
+    const l = new FindingLedger();
+    expect(l.add(card({ cardId: "a", title: "Nvidia Total Revenue", source: "Fiscal.ai", embedUrl: "https://e/a" }))).not.toBeNull();
+    expect(l.add(card({ cardId: "b", title: "Nvidia Total Revenue", source: "S&P Global", embedUrl: "https://e/b" }))).not.toBeNull();
     expect(l.size).toBe(2);
   });
 
-  it("does NOT merge the combined-vs-split comparison trio", () => {
+  it("does NOT merge the combined-vs-split comparison trio (distinct titles, same source)", () => {
     const l = new FindingLedger();
-    l.add(card({ cardId: "1", title: "Nvidia Total revenue - Data center (Quarterly)", embedUrl: "https://e/1" }));
-    l.add(card({ cardId: "2", title: "Advanced Micro Devices Total revenue - Data center (Quarterly)", embedUrl: "https://e/2" }));
-    l.add(card({ cardId: "3", title: "Micro Devices, Nvidia - Total revenue - Data center (Quarterly)", embedUrl: "https://e/3" }));
+    // Different entity/scope tokens in the title → distinct signatures → all kept,
+    // even though the source is identical.
+    l.add(card({ cardId: "1", title: "Nvidia Total revenue - Data center (Quarterly)", source: "S&P Global", embedUrl: "https://e/1" }));
+    l.add(card({ cardId: "2", title: "Advanced Micro Devices Total revenue - Data center (Quarterly)", source: "S&P Global", embedUrl: "https://e/2" }));
+    l.add(card({ cardId: "3", title: "Micro Devices, Nvidia - Total revenue - Data center (Quarterly)", source: "S&P Global", embedUrl: "https://e/3" }));
     expect(l.size).toBe(3);
+  });
+
+  it("keeps quarterly vs annual apart — Tako titles encode the timeframe", () => {
+    const l = new FindingLedger();
+    expect(l.add(card({ cardId: "a", title: "NVIDIA Corporation Total Revenues (Quarterly)", source: "Fiscal.ai", embedUrl: "https://e/a" }))).not.toBeNull();
+    expect(l.add(card({ cardId: "b", title: "NVIDIA Corporation Total Revenues (Annual)", source: "Fiscal.ai", embedUrl: "https://e/b" }))).not.toBeNull();
+    expect(l.size).toBe(2);
   });
 
   it("a differing webpageUrl neither causes nor prevents a merge", () => {

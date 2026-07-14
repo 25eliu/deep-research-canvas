@@ -4,8 +4,8 @@ import { traceToDisplay, stepsToDisplay, countCalls, groundedInOf, type TurnTrac
 import { IconChevronRight } from "./icons";
 import TraceNode from "./TraceNode";
 
-// Pipeline breadcrumbs the run left behind — subtype retries, fan-out caps, guard
-// drops, empty-menu entities. Collapsed by default; the count hints whether the
+// Pipeline breadcrumbs the run left behind — fan-out caps, guard drops,
+// empty-menu entities. Collapsed by default; the count hints whether the
 // graph phase hit any of its safety nets.
 function TraceNotes({ notes }: { notes: string[] }) {
   const [open, setOpen] = useState(false);

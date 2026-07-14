@@ -153,35 +153,35 @@ describe("live graph calls", () => {
   it("stepsToDisplay attaches live graph calls to their node — subject retained", () => {
     const views = stepsToDisplay([
       { t: "reasoning", nodeId: "rq_x", depth: 1, question: "nvidia revenue", kind: "leaf" },
-      { t: "graph", nodeId: "rq_x", call: { endpoint: "graph/search", params: { q: "NVIDIA Corporation", types: "entity", subtype: "Companies" }, ms: 40, results: [{ name: "NVIDIA Corporation" }] } },
-      { t: "graph", nodeId: "rq_x", call: { endpoint: "graph/related", params: { node_id: "nv-1", relation: "metrics", q: "revenue" }, subject: "NVIDIA Corporation", ms: 55, results: [{ name: "Total Revenue" }] } },
+      { t: "graph", nodeId: "rq_x", call: { endpoint: "graph/search", params: { q: "NVIDIA Corporation", types: "entity", label: "ORG" }, ms: 40, results: [{ name: "NVIDIA Corporation" }] } },
+      { t: "graph", nodeId: "rq_x", call: { endpoint: "graph/related", params: { node_id: "nv-1", relation: "metrics", q: "revenue", label: "METRIC" }, subject: "NVIDIA Corporation", ms: 55, results: [{ name: "Total Revenue" }] } },
     ]);
     expect(views).toHaveLength(1);
     expect(views[0].graphCalls).toHaveLength(2);
     expect(views[0].graphCalls[0].endpoint).toBe("graph/search");
-    expect(views[0].graphCalls[0].params.subtype).toBe("Companies");
+    expect(views[0].graphCalls[0].params.label).toBe("ORG");
     expect(views[0].graphCalls[1].results[0].name).toBe("Total Revenue");
     expect(views[0].graphCalls[1].subject).toBe("NVIDIA Corporation"); // related calls stay attributable to their entity
   });
 });
 
-// Entity-first lookup visibility: the planner's subtype choice must survive into
+// Entity-first lookup visibility: the planner's label choice must survive into
 // both the authoritative tree view and the live reasoning view.
-describe("subtype trace plumbing", () => {
-  it("buildTree carries the node's subtype onto the view", () => {
+describe("label trace plumbing", () => {
+  it("buildTree carries the node's label onto the view", () => {
     const flat = [
       { nodeId: "synth", depth: 0, question: "q", kind: "branch" as const, findingCount: 0, children: ["rq_n"] },
-      { nodeId: "rq_n", depth: 1, question: "nvidia revenue", kind: "leaf" as const, findingCount: 1, children: [], entities: ["NVIDIA Corporation", "Nvidia"], subtype: "Companies", metrics: ["revenue"] },
+      { nodeId: "rq_n", depth: 1, question: "nvidia revenue", kind: "leaf" as const, findingCount: 1, children: [], entities: ["NVIDIA Corporation", "Nvidia"], label: "ORG", metrics: ["revenue"] },
     ];
     const leaf = buildTree(flat)[0].children[0];
     expect(leaf.entities).toEqual(["NVIDIA Corporation", "Nvidia"]);
-    expect(leaf.subtype).toBe("Companies");
+    expect(leaf.label).toBe("ORG");
     expect(leaf.metrics).toEqual(["revenue"]);
   });
-  it("stepsToDisplay carries a reasoning step's subtype onto the live view", () => {
+  it("stepsToDisplay carries a reasoning step's label onto the live view", () => {
     const views = stepsToDisplay([
-      { t: "reasoning", nodeId: "rq_n", depth: 1, question: "nvidia revenue", kind: "leaf", entities: ["NVIDIA Corporation"], subtype: "Companies", metrics: ["revenue"] },
+      { t: "reasoning", nodeId: "rq_n", depth: 1, question: "nvidia revenue", kind: "leaf", entities: ["NVIDIA Corporation"], label: "ORG", metrics: ["revenue"] },
     ]);
-    expect(views[0].subtype).toBe("Companies");
+    expect(views[0].label).toBe("ORG");
   });
 });

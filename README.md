@@ -7,7 +7,7 @@ swap**, so you can compare the same board built by three providers:
 - `gpt` / `claude` — **baselines with no tools.** They answer from memory and draw charts
   themselves (a `chartSpec` the frontend renders). No live data, no sources.
 - `tako` — **grounded.** A graph-first pipeline (`graph/search` + `graph/related` +
-  `/v3/search`) resolves entities/metrics and fetches real [Tako](https://trytako.com)
+  `/v3/search`) resolves entities/metrics and fetches real [Tako](https://tako.com)
   knowledge cards for the initial board; follow-up questions and side-chat responses use
   **Tako Answer** (`/api/v1/answer`) for grounded prose + citable cards. Cards render as
   live embeds with source + as-of. The internal LLM sub-steps run on a fast model
@@ -36,6 +36,12 @@ npm run dev                  # http://localhost:3000
 Set `ANTHROPIC_MODEL` / `OPENAI_MODEL` to current model strings for your accounts. Set
 `TAKO_HOST=https://staging.tako.com` — `staging.trytako.com` is Cloudflare-blocked (403 on
 `/api/*`), and staging uses its own key namespace (prod `tako.com` keys 401 on staging).
+
+**Tako keys & docs.** Tako is an answer-engine API for authoritative, cited data — see the
+API reference at **[docs.tako.com](https://docs.tako.com)**. This demo runs against Tako
+staging; grab a staging token at
+[developer.staging.tako.com](https://developer.staging.tako.com). The endpoints used here
+(`/api/v3/search`, `/api/v1/answer`, `/api/beta/graph/*`) are documented in the reference.
 
 Run tests: `npm test`
 
@@ -109,3 +115,8 @@ trees per provider and turn type.
 - **Layering polish.** Add section-container backgrounds and edge-kind color legend.
 
 Not investment advice — the consensus is an analytical ranking on stated criteria.
+
+## License
+
+MIT — see [LICENSE](./LICENSE). This is a demonstration project for the
+[Tako](https://tako.com) API; it is not an official Tako product.

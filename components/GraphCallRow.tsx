@@ -4,12 +4,12 @@ import type { GraphCallRecord } from "@/lib/trace";
 import { IconChevronRight } from "./icons";
 
 // One raw Tako GRAPH API call, rendered like TakoCallRow's two-line ledger:
-//   ▸ "Alphabet" [Companies]               → 5 results
-//     graph/search · types=entity subtype=Companies · 212ms
+//   ▸ "Alphabet" [ORG]                     → 5 results
+//     graph/search · types=entity label=ORG · 212ms
 //   ▸ Alphabet Inc. · "revenue"            → 8 results
-//     graph/related · relation=metric q="revenue" · 187ms
+//     graph/related · relation=metrics q="revenue" label=METRIC · 187ms
 // Expanding reveals the EXACT request params (as a querystring) and every result
-// the graph returned — name, type/subtype, aliases, description. Debug-oriented.
+// the graph returned — name, type/subtype/label, aliases, description. Debug-oriented.
 export default function GraphCallRow({ call }: { call: GraphCallRecord }) {
   const [open, setOpen] = useState(false);
   const panelId = useId();
@@ -25,8 +25,8 @@ export default function GraphCallRow({ call }: { call: GraphCallRecord }) {
     ? `“${call.params.q ?? "(no q)"}”`
     : `${subject} · ${call.params.q ? `“${call.params.q}”` : "full menu"}`;
   const kindMeta = isSearch
-    ? `types=${call.params.types}${call.params.subtype ? ` subtype=${call.params.subtype}` : ""}`
-    : `relation=${call.params.relation ?? call.params.relation_type ?? "overview"}${call.params.q ? ` q="${call.params.q}"` : " (full menu)"}`;
+    ? `types=${call.params.types}${call.params.label ? ` label=${call.params.label}` : ""}`
+    : `relation=${call.params.relation ?? call.params.relation_type ?? "overview"}${call.params.q ? ` q="${call.params.q}"` : " (full menu)"}${call.params.label ? ` label=${call.params.label}` : ""}`;
   const queryString = Object.entries(call.params)
     .filter(([, v]) => v !== undefined && v !== "")
     .map(([k, v]) => `${k}=${v}`)
@@ -68,8 +68,8 @@ export default function GraphCallRow({ call }: { call: GraphCallRecord }) {
                 <div key={`${r.id ?? r.name}-${i}`} className="graph-result">
                   <div className="graph-result-head">
                     <span className="graph-result-name">{r.name}</span>
-                    {(r.type || r.subtype) && (
-                      <span className="graph-result-type">{[r.type, r.subtype].filter(Boolean).join(" · ")}</span>
+                    {(r.type || r.subtype || r.label) && (
+                      <span className="graph-result-type">{[r.type, r.subtype, r.label].filter(Boolean).join(" · ")}</span>
                     )}
                   </div>
                   {r.aliases && r.aliases.length > 0 && (

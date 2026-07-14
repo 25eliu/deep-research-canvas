@@ -12,11 +12,8 @@ const h = vi.hoisted(() => ({
   gapPlan: { sufficient: true, rationale: "covered", gaps: [] } as any,
   reportShouldFail: false,
   gatherCards: [] as string[],
-  broadQueries: ["macro overview"] as string[],
   answer: { answer: "", cards: [] } as any,
   cohortMembers: { entities: [], rationale: "" } as any,
-  overview: [] as any[],
-  crossLinks: { links: [] } as any, // crosslink structured-output result (Error → throw)
   searchEmpty: false, // when true, takoSearch returns no cards (degrade path)
 }));
 
@@ -30,7 +27,6 @@ vi.mock("../../llm", () => ({
       const q = (String(opts.prompt).match(/RESEARCH_QUESTION:\s*(.*)/)?.[1] || "").trim();
       if (String(opts.prompt).includes("CORRECTION:")) return h.plans[`${q}::correction`] ?? { atomic: true, rationale: "direct" };
       if (String(opts.prompt).includes("COHORT_UNAVAILABLE:")) return h.plans[`${q}::cohort-unavailable`] ?? { atomic: true, rationale: "direct" };
-      if (String(opts.prompt).includes("COHORT_GROUPS:")) return h.plans[`${q}::groups`] ?? { atomic: true, rationale: "direct" };
       if (String(opts.prompt).includes("COHORT_MEMBERS:")) return h.plans[`${q}::members`] ?? { atomic: true, rationale: "direct" };
       if (String(opts.prompt).includes("GROUNDED_ANSWER:")) return h.plans[`${q}::grounded`] ?? h.plans[q] ?? { atomic: true, rationale: "direct" };
       return h.plans[q] ?? { atomic: true, rationale: "direct" };
@@ -45,16 +41,11 @@ vi.mock("../../llm", () => ({
       return { queries: ent ? h.related.map((m: string) => `${ent} ${m}`) : [] };
     }
     if (opts.label === "compose") return { queries: h.composeFallback };
-    if (opts.label === "broad-compose") return { queries: h.broadQueries };
     if (opts.label === "answer-report") {
       if (h.reportShouldFail) throw new Error("answer-report boom");
       return h.report;
     }
     if (opts.label === "gap-analysis") return h.gapPlan;
-    if (opts.label === "crosslink") {
-      if (h.crossLinks instanceof Error) throw h.crossLinks;
-      return h.crossLinks;
-    }
     return {};
   }),
   streamAnswer: vi.fn(async (opts: any) => {
@@ -71,9 +62,6 @@ vi.mock("../../llm", () => ({
 vi.mock("./graph", () => ({
   graphSearch: vi.fn(async (name: string) => [{ id: `${name}-id`, name, type: "entity" }]),
   graphRelated: vi.fn(async () => h.related.map((name, i) => ({ id: `m${i}`, name, aliases: [] }))),
-  graphOverview: vi.fn(async (nodeId: string) => ({
-    node: { id: nodeId, name: `node:${nodeId}`, type: "entity" }, relations: h.overview,
-  })),
 }));
 
 vi.mock("../../tako", () => ({
@@ -121,11 +109,8 @@ beforeEach(() => {
   h.gapPlan = { sufficient: true, rationale: "ok", gaps: [] };
   h.reportShouldFail = false;
   h.gatherCards = [];
-  h.broadQueries = ["macro overview"];
   h.answer = { answer: "", cards: [] };
   h.cohortMembers = { entities: [], rationale: "" };
-  h.overview = [];
-  h.crossLinks = { links: [] };
   h.searchEmpty = false;
 });
 
@@ -164,25 +149,22 @@ describe("runTakoExpand", () => {
   });
 });
 
-describe("runTakoExpand cross-links", () => {
-  it("emits a validated supports edge the LLM proposes to an existing node", async () => {
-    h.crossLinks = { links: [{ from: "SELF_ROOT", to: "rq_nvda", kind: "supports", reason: "same sector" }] };
-    const res = await runTakoExpand(expandReq(), "HIST");
+describe("runTakoExpand edge discipline", () => {
+  it("never emits LLM cross-link edges — every edge stays inside the new tree except the anchor", async () => {
+    const res = await runTakoExpand(expandReq({ selection: { nodeIds: ["rq_nvda"], nodes: [] } }), "HIST");
     const ops = res.nodeOps as any[];
+    const newIds = new Set(ops.filter((o) => o.op === "add_node").map((o) => o.node.id));
     const newRoot = ops.find((o) => o.op === "add_node" && o.node.role === "synthesis")!.node.id;
-    const link = ops.find((o) => o.op === "add_edge" && o.edge.kind === "supports" && o.edge.to === "rq_nvda");
-    expect(link?.edge.from).toBe(newRoot);
-  });
-
-  it("drops a proposed edge whose target is not a real board node", async () => {
-    h.crossLinks = { links: [{ from: "SELF_ROOT", to: "ghost_node", kind: "supports", reason: "nope" }] };
-    const res = await runTakoExpand(expandReq(), "HIST");
-    expect(res.nodeOps.some((o: any) => o.op === "add_edge" && o.edge.to === "ghost_node")).toBe(false);
-  });
-
-  it("survives a cross-link LLM failure without dropping the tree", async () => {
-    h.crossLinks = new Error("crosslink boom");
-    const res = await runTakoExpand(expandReq(), "HIST");
-    expect(res.nodeOps.some((o: any) => o.op === "add_node" && o.node.role === "synthesis")).toBe(true);
+    for (const o of ops) {
+      if (o.op !== "add_edge") continue;
+      // The only edge allowed to touch the existing board is the root's derived_from anchor.
+      const touchesBoard = !newIds.has(o.edge.from) || !newIds.has(o.edge.to);
+      if (touchesBoard) {
+        expect(o.edge.kind).toBe("derived_from");
+        expect(o.edge.from).toBe(newRoot);
+      }
+    }
+    // The semantic cross-link kinds never leave the pipeline on this lane.
+    expect(ops.some((o) => o.op === "add_edge" && o.edge.kind === "contradicts")).toBe(false);
   });
 });

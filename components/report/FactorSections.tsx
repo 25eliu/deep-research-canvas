@@ -30,8 +30,8 @@ export default function FactorSections({ block }: { block: SectionsBlock }) {
               {s.figure ? (
                 <span className="factor-figure">
                   <strong>{s.figure.value}</strong>
-                  {s.figure.delta ? <span className="factor-delta"> {s.figure.delta}</span> : null}
-                  <span className="factor-figure-label"> {s.figure.label}</span>
+                  {s.figure.delta ? <span className="factor-delta">{s.figure.delta}</span> : null}
+                  <span className="factor-figure-label">{s.figure.label}</span>
                 </span>
               ) : null}
             </button>

@@ -9,11 +9,10 @@ import type { GraphCallRecord } from "../shared/types";
 import { generateStructured } from "../../llm";
 import { ctxBlock } from "../shared/ctx";
 import { zQueries, type GraphLookup } from "../shared/schemas";
-import { graphSearch, graphRelated, graphOverview, type GraphNode, type GraphItem, type GraphRelation } from "./graph";
+import { graphSearch, graphRelated, type GraphNode, type GraphItem } from "./graph";
 import { diversifyQueries } from "./queries";
 import {
-  COMPOSE_SYSTEM, BROAD_COMPOSE_SYSTEM,
-  SEARCH_LEAF_COMPOSE_SYSTEM, SEARCH_BROAD_COMPOSE_SYSTEM,
+  COMPOSE_SYSTEM, SEARCH_LEAF_COMPOSE_SYSTEM,
 } from "./prompts";
 
 const OPENAI = "openai" as const;
@@ -38,77 +37,14 @@ export interface QueryPlan {
   graphMs?: number;
 }
 
+// Leaf query composition only: the synthesis (root) node NEVER graph-resolves or
+// searches on its own — its children own the per-facet data and the gap round
+// fetches what's missing. That asymmetry is deliberate; do not add a broad/root
+// query path back here.
 export interface QueryStrategy {
   // nodeId (when given) lets the graph phase stream each raw graph call live onto
   // that research node's trace row ("graph_call" events).
   leafQueries(ctx: ResearchCtx, question: string, lookup: GraphLookup, nodeId?: string): Promise<QueryPlan>;
-  broadQueries(ctx: ResearchCtx, question: string, lookup: GraphLookup, nodeId?: string): Promise<QueryPlan>;
-  // Optional cohort roster resolution — graphStrategy only
-  cohortRoster?(ctx: ResearchCtx, cohort: string, anchor: GraphLookup, nodeId?: string): Promise<CohortRoster | null>;
-}
-
-// ---- graph-grounded cohort roster (spec 2026-07-12) ----
-// A cohort question's member set, read straight off the anchor node's /related
-// OVERVIEW — exhaustive and pre-resolved (each member is a real graph node),
-// replacing LLM extraction from answer prose as the primary roster source.
-export interface RosterMember { id: string; name: string; aliases: string[] }
-export interface RosterGroup { key: string; kind: string; label: string; total: number; totalCapped: boolean; members: RosterMember[] }
-export interface CohortRoster {
-  anchor: { id: string; name: string };
-  groups: RosterGroup[];
-  graphCalls: GraphCallRecord[];
-  expand: (key: string) => Promise<RosterMember[]>;
-}
-
-const ROSTER_DRILL_LIMIT = 100; // one page of a drilled group — full roster context, bounded
-
-// graphOverview with the exact params + a per-GROUP results summary recorded into
-// `rec` (one row per group: key + "label — total") and mirrored live via onCall.
-async function recordedOverview(
-  rec: GraphCallRecord[], nodeId: string, subject: string, onCall?: (c: GraphCallRecord) => void,
-): Promise<GraphRelation[]> {
-  const params = { node_id: nodeId };
-  const t = Date.now();
-  try {
-    const { relations } = await graphOverview(nodeId);
-    const call: GraphCallRecord = {
-      endpoint: "graph/related", params, subject, ms: Date.now() - t,
-      results: relations.map((r) => ({ id: r.key, name: `${r.label} — ${r.totalCapped ? `>${r.total}` : r.total}` })),
-    };
-    rec.push(call);
-    onCall?.(call);
-    return relations;
-  } catch (e: unknown) {
-    const call: GraphCallRecord = { endpoint: "graph/related", params, subject, ms: Date.now() - t, results: [], error: errorMessage(e) };
-    rec.push(call);
-    onCall?.(call);
-    throw e;
-  }
-}
-
-function toMembers(items: GraphItem[]): RosterMember[] {
-  return items.filter((i) => i.id && i.name).map((i) => ({ id: i.id, name: i.name, aliases: i.aliases ?? [] }));
-}
-
-// Keep only groups that can BE a cohort: drop data (metrics) and source kinds
-// outright; drop capped sibling groups (">1000 Other Companies" enumerates the
-// whole class namespace, not this node's cohort); drop empty groups; and keep one
-// of each reciprocal pair (rel:competes_with / rel:competitors_of carry identical
-// member sets — same total + same inline ids ⇒ the same edge read both ways).
-export function cohortGroups(relations: GraphRelation[]): RosterGroup[] {
-  const seen = new Set<string>();
-  const out: RosterGroup[] = [];
-  for (const r of relations) {
-    if (r.kind === "data" || r.kind === "source") continue;
-    if (r.kind === "sibling" && r.totalCapped) continue;
-    const members = toMembers(r.items);
-    if (members.length === 0) continue;
-    const sig = `${r.total}|${members.map((m) => m.id).sort().join(",")}`;
-    if (seen.has(sig)) continue;
-    seen.add(sig);
-    out.push({ key: r.key, kind: r.kind, label: r.label, total: r.total, totalCapped: r.totalCapped, members });
-  }
-  return out;
 }
 
 interface ResolvedEntity {
@@ -123,6 +59,7 @@ function compactResult(n: GraphNode | GraphItem): GraphCallRecord["results"][num
     id: n.id, name: n.name,
     ...("type" in n && n.type ? { type: n.type } : {}),
     ...("subtype" in n && n.subtype ? { subtype: n.subtype } : {}),
+    ...("label" in n && n.label ? { label: n.label } : {}),
     ...(n.aliases?.length ? { aliases: n.aliases } : {}),
     ...(n.description ? { description: n.description.slice(0, GRAPH_RESULT_DESC_CAP) } : {}),
   };
@@ -133,10 +70,10 @@ function compactResult(n: GraphNode | GraphItem): GraphCallRecord["results"][num
 // and mirrored live via `onCall` (→ a "graph_call" event) so the streaming trace
 // shows graph activity as it happens. Failures are recorded too, then rethrown.
 async function recordedSearch(
-  rec: GraphCallRecord[], q: string, opts: { types: "entity" | "metric"; subtype?: string; limit?: number },
+  rec: GraphCallRecord[], q: string, opts: { label?: string; limit?: number },
   onCall?: (c: GraphCallRecord) => void,
 ): Promise<GraphNode[]> {
-  const params = { q, types: opts.types, ...(opts.subtype ? { subtype: opts.subtype } : {}), limit: opts.limit ?? 5 };
+  const params = { q, types: "entity", ...(opts.label ? { label: opts.label } : {}), limit: opts.limit ?? 5 };
   const t = Date.now();
   try {
     const nodes = await graphSearch(q, opts);
@@ -154,15 +91,15 @@ async function recordedSearch(
 
 async function recordedRelated(
   rec: GraphCallRecord[], nodeId: string,
-  opts: { relation: string; q?: string; limit?: number; subject?: string },
+  opts: { relation: string; q?: string; limit?: number; subject?: string; label?: string },
   onCall?: (c: GraphCallRecord) => void,
 ): Promise<GraphItem[]> {
   const q = opts.q?.trim();
-  const params = { node_id: nodeId, relation: opts.relation, ...(q ? { q } : {}), limit: opts.limit ?? 6 };
+  const params = { node_id: nodeId, relation: opts.relation, ...(q ? { q } : {}), ...(opts.label ? { label: opts.label } : {}), limit: opts.limit ?? 6 };
   const subject = opts.subject ? { subject: opts.subject } : {};
   const t = Date.now();
   try {
-    const items = await graphRelated(nodeId, { relation: opts.relation, ...(q ? { q } : {}), ...(opts.limit ? { limit: opts.limit } : {}) });
+    const items = await graphRelated(nodeId, { relation: opts.relation, ...(q ? { q } : {}), ...(opts.limit ? { limit: opts.limit } : {}), ...(opts.label ? { label: opts.label } : {}) });
     const call: GraphCallRecord = { endpoint: "graph/related", params, ...subject, ms: Date.now() - t, results: items.map(compactResult) };
     rec.push(call);
     onCall?.(call);
@@ -187,12 +124,12 @@ function dedupeCi(items: string[]): string[] {
 
 // Graph budget per research node — DETERMINISTIC by construction: the decompose step
 // emits a validated entity-first LOOKUP (1-3 candidate names for ONE subject + optional
-// subtype + 1-3 metric substring filters). The graph phase is one subtype-filtered
-// entity search per name (plus at most one unfiltered retry each), then a related
-// fan-out of node×filter pairs over the top-3 hits of every name (deduped across
-// names), truncated at a hard cap. Top-3 (not 5): the subtype filter makes the top
-// hits accurate, so a wider fan-out mostly adds junk-node related calls.
-// The metric namespace is NEVER searched.
+// NER label + 1-3 metric substring filters). The graph phase is one entity search per
+// name (label boosts the on-type node's rank; nothing is filtered out), then a related
+// fan-out of node×filter pairs over the top-3 hits of every name (deduped across names),
+// truncated at a hard cap. Top-3 (not 5): the label boost ranks the right node up, so a
+// wider fan-out mostly adds junk-node related calls.
+// The metric namespace is NEVER searched (metrics come from the "metrics" relation).
 const ENTITY_SEARCH_LIMIT = 3;  // top-3 per candidate name fan out post-dedupe
 const MAX_METRIC_FILTERS = 5;   // filter-variant list cap (schema-matched) — breadth beats one perfect guess
 const RELATED_LIMIT = 8;        // items per node×filter fetch
@@ -212,22 +149,32 @@ interface ResolvedGraph {
 
 const itemKey = (i: GraphItem) => i.id || i.name.trim().toLowerCase();
 
-// Search each candidate name (subtype-filtered when the planner set one), containing
-// per-name failures as notes. A subtype that filters everything out gets ONE unfiltered
-// retry — the LLM picked a wrong class and must not hide the right node.
+// Per-turn graph memo (ctx.graphMemo): the memo stores IN-FLIGHT promises, so
+// concurrent resolves of the same key (parallel gap fills, sibling leaves sharing a
+// subject) ride ONE request and later resolves are instant. A rejected fetch is
+// evicted so transient failures aren't cached for the rest of the turn. Cache hits
+// record no graph call — the first fetch's trace entry is the audit.
+function memoized<T>(memo: Map<string, Promise<T>>, key: string, fetch: () => Promise<T>): Promise<T> {
+  const hit = memo.get(key);
+  if (hit) return hit;
+  const p = fetch();
+  memo.set(key, p);
+  p.catch(() => memo.delete(key));
+  return p;
+}
+
+// Search each candidate name (label-boosted when the planner set one), containing
+// per-name failures as notes. `label` only ranks matching-label nodes higher — it never
+// excludes, so there is nothing to retry: one search per name.
 async function searchNames(
-  ctx: ResearchCtx, rec: GraphCallRecord[], names: string[], subtype: string | undefined,
+  ctx: ResearchCtx, rec: GraphCallRecord[], names: string[], label: string | undefined,
   onCall?: (c: GraphCallRecord) => void,
 ): Promise<{ name: string; nodes: GraphNode[] }[]> {
   return Promise.all(names.map(async (name) => {
     try {
-      let nodes = await recordedSearch(
-        rec, name, { types: "entity", ...(subtype ? { subtype } : {}), limit: ENTITY_SEARCH_LIMIT }, onCall,
+      const nodes = await memoized(ctx.graphMemo.search, `${name.trim().toLowerCase()}|${label ?? ""}`, () =>
+        recordedSearch(rec, name, { ...(label ? { label } : {}), limit: ENTITY_SEARCH_LIMIT }, onCall),
       );
-      if (nodes.length === 0 && subtype) {
-        ctx.notes.push(`no "${subtype}" node for "${name}" — retrying unfiltered`);
-        nodes = await recordedSearch(rec, name, { types: "entity", limit: ENTITY_SEARCH_LIMIT }, onCall);
-      }
       if (nodes.length === 0) ctx.notes.push(`No graph node for "${name}"`);
       // Enforce the fan-out cap in code too — the limit param bounds the API response,
       // but the cap must hold even if the API returns more.
@@ -277,14 +224,14 @@ async function resolveGraph(ctx: ResearchCtx, lookup: GraphLookup, researchNodeI
     : undefined;
   const names = dedupeCi(lookup.entities).slice(0, 3);
   const filters = dedupeCi(lookup.metricFilters).slice(0, MAX_METRIC_FILTERS);
-  const subtype = lookup.subtype?.trim() || undefined;
+  const label = lookup.label?.trim() || undefined;
 
   let ranked: { node: GraphNode; from: string }[];
   if (lookup.node) {
     // Pre-resolved (cohort-roster member): the id is already exact — skip the search.
     ranked = [{ node: { id: lookup.node.id, name: lookup.node.name, type: "entity" }, from: lookup.node.name }];
   } else {
-    const perName = await searchNames(ctx, graphCalls, names, subtype, onCall);
+    const perName = await searchNames(ctx, graphCalls, names, label, onCall);
     ranked = rankNodes(perName);
   }
   for (const r of ranked) ctx.resolved.push({ query: r.from, node: r.node.name });
@@ -307,11 +254,13 @@ async function resolveGraph(ctx: ResearchCtx, lookup: GraphLookup, researchNodeI
     menus.set(p.node.id, menu);
     menu.attempted = true;
     try {
-      const items = await recordedRelated(
-        graphCalls, p.node.id,
-        { relation: "metrics", ...(p.q ? { q: p.q } : {}), limit: p.q ? RELATED_LIMIT : FULL_MENU_LIMIT, subject: p.node.name },
-        onCall,
-      );
+      const limit = p.q ? RELATED_LIMIT : FULL_MENU_LIMIT;
+      const items = await memoized(ctx.graphMemo.related, `${p.node.id}|${p.q ?? ""}|${limit}`, () =>
+        recordedRelated(
+          graphCalls, p.node.id,
+          { relation: "metrics", ...(p.q ? { q: p.q } : {}), limit, subject: p.node.name, label: "METRIC" },
+          onCall,
+        ));
       for (const i of items) {
         if (!menu.items.some((x) => itemKey(x) === itemKey(i))) menu.items.push(i);
       }
@@ -333,7 +282,10 @@ async function resolveGraph(ctx: ResearchCtx, lookup: GraphLookup, researchNodeI
     if (!menu?.attempted || menu.items.length > 0 || filters.length === 0) continue;
     retries++;
     try {
-      menu.items = await recordedRelated(graphCalls, r.node.id, { relation: "metrics", limit: FULL_MENU_LIMIT, subject: r.node.name }, onCall);
+      // .slice(): the memo hands every consumer the SAME array — this node's menu must
+      // stay mutation-independent of other nodes sharing the cache entry.
+      menu.items = (await memoized(ctx.graphMemo.related, `${r.node.id}||${FULL_MENU_LIMIT}`, () =>
+        recordedRelated(graphCalls, r.node.id, { relation: "metrics", limit: FULL_MENU_LIMIT, subject: r.node.name, label: "METRIC" }, onCall))).slice();
     } catch (e: unknown) {
       ctx.notes.push(`graph lookup failed for "${r.node.name}" — ${errorMessage(e)}`);
     }
@@ -492,67 +444,6 @@ export const graphStrategy: QueryStrategy = {
     const queries = await groundedQueries(ctx, question, resolved, lookup);
     return { queries, graph, graphCalls, graphMs };
   },
-  async broadQueries(ctx, question, lookup, nodeId) {
-    const { resolved, graphCalls, graphMs } = await resolveGraph(ctx, lookup, nodeId);
-    const graph = planGraph(resolved);
-    const resolvedInfo = resolved
-      .map((r) => `${r.entity}: ${metricLines(r.related.slice(0, 5))}`)
-      .join("\n");
-    let queries: string[] = [];
-    try {
-      const composed = await generateStructured({
-        provider: OPENAI, system: BROAD_COMPOSE_SYSTEM,
-        prompt: `${ctxBlock(ctx.req)}\n\nQUESTION: ${question}\n\nRESOLVED:\n${resolvedInfo || "(none)"}`,
-        schema: zQueries, label: "broad-compose",
-      });
-      queries = Array.from(new Set(composed.queries.map((q) => q.trim()))).filter(Boolean).slice(0, 2);
-    } catch (e: unknown) {
-      ctx.notes.push(`broad compose failed — ${errorMessage(e)}`);
-    }
-    return { queries, graph, graphCalls, graphMs };
-  },
-  // Cohort roster: resolve the ANCHOR (the entity the class hangs off, or the
-  // class's own node) with the same subtype-filtered search + unfiltered retry the
-  // leaves use, then ONE overview call. Null (never throw) on any miss — the
-  // caller falls back to answer-prose extraction.
-  async cohortRoster(ctx, cohort, anchor, nodeId) {
-    const t = Date.now();
-    const graphCalls: GraphCallRecord[] = [];
-    const onCall = nodeId && ctx.emit
-      ? (call: GraphCallRecord) => ctx.emit!({ type: "graph_call", nodeId, call })
-      : undefined;
-    const names = dedupeCi(anchor.entities).slice(0, 3);
-    if (names.length === 0) {
-      ctx.notes.push(`cohort "${cohort.slice(0, 50)}" has no anchor entities — using answer-grounded resolution`);
-      return null;
-    }
-    try {
-      const perName = await searchNames(ctx, graphCalls, names, anchor.subtype?.trim() || undefined, onCall);
-      const ranked = rankNodes(perName);
-      if (ranked.length === 0) {
-        ctx.notes.push(`cohort anchor "${names[0]}" resolved no graph node — using answer-grounded resolution`);
-        return null;
-      }
-      const node = ranked[0].node;
-      const relations = await recordedOverview(graphCalls, node.id, node.name, onCall);
-      const groups = cohortGroups(relations);
-      if (groups.length === 0) {
-        ctx.notes.push(`no cohort-shaped relation groups on "${node.name}" — using answer-grounded resolution`);
-        return null;
-      }
-      return {
-        anchor: { id: node.id, name: node.name },
-        groups, graphCalls,
-        expand: async (key: string) =>
-          toMembers(await recordedRelated(graphCalls, node.id, { relation: key, limit: ROSTER_DRILL_LIMIT, subject: node.name }, onCall)),
-      };
-    } catch (e: unknown) {
-      ctx.notes.push(`cohort graph lookup failed — ${errorMessage(e)}`);
-      return null;
-    } finally {
-      ctx.timings.graph = Math.max(ctx.timings.graph, Date.now() - t);
-    }
-  },
 };
 
 // searchStrategy: no graph. The LLM composes queries straight from the sub-question,
@@ -570,20 +461,6 @@ export const searchStrategy: QueryStrategy = {
       return { queries: diversifyQueries(dq, { threshold: 0.6, max: LEAF_QUERY_CAP }), graph: [] };
     } catch (e: unknown) {
       ctx.notes.push(`search-leaf compose failed — ${errorMessage(e)}`);
-      return { queries: [], graph: [] };
-    }
-  },
-  async broadQueries(ctx, question) {
-    try {
-      const composed = await generateStructured({
-        provider: OPENAI, system: SEARCH_BROAD_COMPOSE_SYSTEM,
-        prompt: `${ctxBlock(ctx.req)}\n\nQUESTION: ${question}`,
-        schema: zQueries, label: "search-broad-compose",
-      });
-      const dq = Array.from(new Set(composed.queries.map((q) => q.trim()))).filter(Boolean);
-      return { queries: dq.slice(0, 2), graph: [] };
-    } catch (e: unknown) {
-      ctx.notes.push(`search-broad compose failed — ${errorMessage(e)}`);
       return { queries: [], graph: [] };
     }
   },

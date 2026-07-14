@@ -8,15 +8,13 @@ const h = vi.hoisted(() => ({
   compose: [] as string[],  // queries for the last-resort free compose
   prompts: [] as { label: string; prompt: string }[], // every generateStructured call
   searchNodes: [] as any[],           // graphSearch results (default for every term)
-  entityNodesByTerm: {} as Record<string, any[]>, // per-term results; `${q}|${subtype}` keys override plain `q`
+  entityNodesByTerm: {} as Record<string, any[]>, // per-term results; `${q}|${label}` keys override plain `q`
   searchErrorByTerm: {} as Record<string, boolean>, // graphSearch throws for these terms
   searchCalls: [] as any[],           // captured graphSearch (q, opts), in call order
   relatedByNodeQ: {} as Record<string, any[]>, // graphRelated result per `${nodeId}|${q ?? ""}` (checked first)
   relatedByNode: {} as Record<string, any[]>,  // fixed graphRelated result per node id
   relatedByCall: [] as any[][],       // graphRelated result per successive call (fallback queue)
   relatedCalls: [] as any[],          // captured graphRelated {nodeId, ...opts}, in call order
-  overviewByNode: {} as Record<string, any>, // graphOverview relations per node id
-  overviewCalls: [] as string[],             // node ids overview was called for
 }));
 
 vi.mock("../../llm", () => ({
@@ -35,7 +33,7 @@ vi.mock("./graph", () => ({
   graphSearch: vi.fn(async (q: string, opts: any) => {
     h.searchCalls.push({ q, opts });
     if (h.searchErrorByTerm[q]) throw new Error("graph search down");
-    const keyed = opts?.subtype ? h.entityNodesByTerm[`${q}|${opts.subtype}`] : undefined;
+    const keyed = opts?.label ? h.entityNodesByTerm[`${q}|${opts.label}`] : undefined;
     return keyed ?? h.entityNodesByTerm[q] ?? h.searchNodes;
   }),
   graphRelated: vi.fn(async (nodeId: string, opts: any) => {
@@ -45,20 +43,15 @@ vi.mock("./graph", () => ({
     if (h.relatedByNode[nodeId]) return h.relatedByNode[nodeId];
     return h.relatedByCall.shift() ?? [];
   }),
-  graphOverview: vi.fn(async (nodeId: string) => {
-    h.overviewCalls.push(nodeId);
-    const o = h.overviewByNode[nodeId];
-    if (o instanceof Error) throw o;
-    return { node: { id: nodeId, name: `node-${nodeId}`, type: "entity" }, relations: o ?? [] };
-  }),
 }));
 
 import { searchStrategy, graphStrategy } from "./strategy";
 import type { ResearchCtx } from "./research";
 
-// searchStrategy only reads ctx.req + ctx.notes; graphStrategy also touches
-// ctx.resolved / ctx.related / ctx.timings.
-function stubCtx(): ResearchCtx {
+// searchStrategy only reads ctx.req + ctx.notes (+ ctx.ledger for the broad
+// ALREADY_FOUND block); graphStrategy also touches ctx.resolved / ctx.related /
+// ctx.timings. `found` seeds the ledger stub with already-fetched data cards.
+function stubCtx(found: string[] = []): ResearchCtx {
   return {
     req: {
       canvasId: "c", message: "q", surface: "main",
@@ -68,19 +61,20 @@ function stubCtx(): ResearchCtx {
     notes: [],
     resolved: [],
     related: [],
+    ledger: { list: () => found.map((title) => ({ kind: "data_card", title })) },
+    graphMemo: { search: new Map(), related: new Map() },
     timings: { graph: 0, search: 0, decompose: 0, stream: 0 },
   } as unknown as ResearchCtx;
 }
 
-const lookup = (entities: string[], metricFilters: string[], subtype?: string): GraphLookup =>
-  ({ entities, metricFilters, ...(subtype ? { subtype } : {}) });
+const lookup = (entities: string[], metricFilters: string[], label?: string): GraphLookup =>
+  ({ entities, metricFilters, ...(label ? { label } : {}) });
 
 beforeEach(() => {
   vi.clearAllMocks();
   h.leaf = []; h.broad = []; h.grounded = []; h.compose = []; h.prompts = [];
   h.searchNodes = []; h.entityNodesByTerm = {}; h.searchErrorByTerm = {}; h.searchCalls = [];
   h.relatedByNodeQ = {}; h.relatedByNode = {}; h.relatedByCall = []; h.relatedCalls = [];
-  h.overviewByNode = {}; h.overviewCalls = [];
 });
 
 describe("searchStrategy", () => {
@@ -98,11 +92,11 @@ describe("searchStrategy", () => {
     expect(new Set(plan.queries).size).toBe(plan.queries.length); // no exact dups
   });
 
-  it("caps broad queries at 2 with an empty graph", async () => {
-    h.broad = ["US economy overview", "US GDP growth", "US inflation overview"];
-    const plan = await searchStrategy.broadQueries(stubCtx(), "how is the US economy doing?", lookup(["US"], ["GDP"]));
-    expect(plan.graph).toEqual([]);
-    expect(plan.queries.length).toBeLessThanOrEqual(2);
+  // The synthesis (root) node never searches — the strategy seam must not offer it a
+  // broad/overview query path at all.
+  it("exposes NO broadQueries — the root cannot compose searches", () => {
+    expect((searchStrategy as unknown as Record<string, unknown>).broadQueries).toBeUndefined();
+    expect((graphStrategy as unknown as Record<string, unknown>).broadQueries).toBeUndefined();
   });
 
   it("returns empty queries (not throw) when the LLM call fails", async () => {
@@ -124,34 +118,34 @@ const ETF = { id: "botz-id", name: "Global X Robotics & AI ETF", type: "entity" 
 const mkNodes = (prefix: string, n: number) =>
   Array.from({ length: n }, (_, i) => ({ id: `${prefix}${i}`, name: `${prefix.toUpperCase()} ${i}`, type: "entity" }));
 
-describe("graphStrategy — entity-first search (candidate names + subtype, no metric namespace)", () => {
+describe("graphStrategy — entity-first search (candidate names + label boost, no metric namespace)", () => {
   it("searches EACH candidate name in the entity namespace — NEVER the metric namespace", async () => {
     h.entityNodesByTerm = { Google: [{ id: "goog", name: "Google", type: "entity" }], Alphabet: [{ id: "abc", name: "Alphabet Inc.", type: "entity" }] };
     await graphStrategy.leafQueries(stubCtx(), "q", lookup(["Google", "Alphabet"], ["revenue"]));
-    const entitySearches = h.searchCalls.filter((c) => c.opts?.types === "entity").map((c) => c.q);
-    const metricSearches = h.searchCalls.filter((c) => c.opts?.types === "metric");
-    expect(entitySearches).toEqual(["Google", "Alphabet"]); // every candidate name, entity namespace only
-    expect(metricSearches).toEqual([]);                     // discoverMetrics is GONE — regression lock
+    // graphSearch is entity-only now (types is set inside graph.ts, never a metric branch)
+    // — so the candidate names ARE the searches; discoverMetrics is gone by construction.
+    expect(h.searchCalls.map((c) => c.q)).toEqual(["Google", "Alphabet"]);
   });
 
-  it("forwards the subtype to every name's search, limit 3", async () => {
+  it("forwards the label boost to every name's search, limit 3", async () => {
     h.searchNodes = [APPLE_INC];
-    await graphStrategy.leafQueries(stubCtx(), "q", lookup(["Apple Inc.", "Apple"], ["revenue"], "Companies"));
+    await graphStrategy.leafQueries(stubCtx(), "q", lookup(["Apple Inc.", "Apple"], ["revenue"], "ORG"));
     expect(h.searchCalls).toHaveLength(2);
     for (const c of h.searchCalls) {
-      expect(c.opts).toMatchObject({ types: "entity", subtype: "Companies", limit: 3 });
+      expect(c.opts).toMatchObject({ label: "ORG", limit: 3 });
     }
   });
 
-  it("retries a zero-result subtype-filtered search WITHOUT the subtype", async () => {
-    h.entityNodesByTerm = { "Tesla|Companies": [], Tesla: [TESLA] };
+  it("searches each name exactly once — label is a boost, so there is no unfiltered retry", async () => {
+    // Even when the label-boosted search returns nothing on-label, there is no second
+    // call: the boost never excludes, so a single search is authoritative.
+    h.entityNodesByTerm = { Tesla: [TESLA] };
     h.relatedByCall = [[{ name: "Total Revenue", aliases: [] }]];
     const ctx = stubCtx();
-    const plan = await graphStrategy.leafQueries(ctx, "q", lookup(["Tesla"], ["revenue"], "Companies"));
-    expect(h.searchCalls).toHaveLength(2);
-    expect(h.searchCalls[0].opts.subtype).toBe("Companies");
-    expect(h.searchCalls[1].opts.subtype).toBeUndefined(); // retry unfiltered
-    expect(ctx.notes.some((n) => n.includes("retrying unfiltered"))).toBe(true);
+    const plan = await graphStrategy.leafQueries(ctx, "q", lookup(["Tesla"], ["revenue"], "ORG"));
+    expect(h.searchCalls).toHaveLength(1);
+    expect(h.searchCalls[0].opts.label).toBe("ORG");
+    expect(ctx.notes.some((n) => n.includes("retrying unfiltered"))).toBe(false);
     expect(plan.graph).toContainEqual({ entity: "Tesla", related: ["Total Revenue"], kind: "entity" });
   });
 
@@ -168,10 +162,10 @@ describe("graphStrategy — entity-first search (candidate names + subtype, no m
     expect(relatedNodes).toContain("goog");
     expect(relatedNodes).toContain("abc");
     expect(relatedNodes).toContain("g1"); // 3rd hit fans out…
-    expect(relatedNodes).not.toContain("g2"); // …but the 4th/5th do not (top-3, subtype makes top hits accurate)
+    expect(relatedNodes).not.toContain("g2"); // …but the 4th/5th do not (top-3, label boost ranks the right node up)
   });
 
-  it("calls related once per node×filter — relation=metric, q=the short filter, limit 8", async () => {
+  it("calls related once per node×filter — relation=metrics, label=METRIC, q=the short filter, limit 8", async () => {
     h.searchNodes = [TESLA];
     h.relatedByNodeQ = {
       "tesla-id|revenue": [{ id: "m1", name: "Total Revenue", aliases: [] }],
@@ -179,8 +173,8 @@ describe("graphStrategy — entity-first search (candidate names + subtype, no m
     };
     await graphStrategy.leafQueries(stubCtx(), "q", lookup(["Tesla"], ["revenue", "profit"]));
     expect(h.relatedCalls).toHaveLength(2);
-    expect(h.relatedCalls[0]).toMatchObject({ nodeId: "tesla-id", relation: "metrics", q: "revenue", limit: 8 });
-    expect(h.relatedCalls[1]).toMatchObject({ nodeId: "tesla-id", relation: "metrics", q: "profit", limit: 8 });
+    expect(h.relatedCalls[0]).toMatchObject({ nodeId: "tesla-id", relation: "metrics", q: "revenue", limit: 8, label: "METRIC" });
+    expect(h.relatedCalls[1]).toMatchObject({ nodeId: "tesla-id", relation: "metrics", q: "profit", limit: 8, label: "METRIC" });
   });
 
   it("filters by the SHORT filter term — never the question or the entity name", async () => {
@@ -334,16 +328,17 @@ describe("graphStrategy grounded compose", () => {
     expect(plan.queries).toEqual(["US CPI shelter trend 2025"]);
   });
 
-  it("records every graph call (search + related) with exact params — including subtype — and results", async () => {
-    h.entityNodesByTerm = { "Tesla|Companies": [TESLA] };
+  it("records every graph call (search + related) with exact params — including label — and results", async () => {
+    h.entityNodesByTerm = { "Tesla|ORG": [TESLA] };
     h.relatedByNodeQ = { "tesla-id|revenue": [{ id: "r1", name: "Total Revenue", aliases: [] }] };
-    const plan = await graphStrategy.leafQueries(stubCtx(), "q", lookup(["Tesla"], ["revenue"], "Companies"));
+    const plan = await graphStrategy.leafQueries(stubCtx(), "q", lookup(["Tesla"], ["revenue"], "ORG"));
     const calls = plan.graphCalls ?? [];
     const ent = calls.find((c) => c.endpoint === "graph/search");
-    expect(ent?.params).toMatchObject({ q: "Tesla", types: "entity", subtype: "Companies", limit: 3 });
+    expect(ent?.params).toMatchObject({ q: "Tesla", types: "entity", label: "ORG", limit: 3 });
+    expect((ent?.params as Record<string, unknown>).subtype).toBeUndefined(); // subtype is no longer a request param
     expect(ent?.results.map((r) => r.name)).toEqual(["Tesla"]);
     const rel = calls.find((c) => c.endpoint === "graph/related");
-    expect(rel?.params).toMatchObject({ node_id: "tesla-id", relation: "metrics", q: "revenue", limit: 8 });
+    expect(rel?.params).toMatchObject({ node_id: "tesla-id", relation: "metrics", q: "revenue", limit: 8, label: "METRIC" });
     expect(rel?.subject).toBe("Tesla"); // display name of the entity the fetch was for
     expect(rel?.results.map((r) => r.name)).toEqual(["Total Revenue"]);
   });
@@ -363,17 +358,6 @@ describe("graphStrategy grounded compose", () => {
     expect(failed[0].results).toEqual([]);
   });
 
-  it("broadQueries grounds broad-compose in the per-entity menus (no standalone series)", async () => {
-    h.searchNodes = [TESLA];
-    h.relatedByNodeQ = { "tesla-id|revenue": [{ id: "m1", name: "Total Revenue", aliases: [] }] };
-    h.broad = ["Tesla overview", "Tesla revenue trend", "extra"];
-    const plan = await graphStrategy.broadQueries(stubCtx(), "how is Tesla doing?", lookup(["Tesla"], ["revenue"]));
-    const bc = h.prompts.find((p) => p.label === "broad-compose");
-    expect(bc?.prompt).toContain("Tesla: Total Revenue");
-    expect(bc?.prompt).not.toContain("Standalone series");
-    expect(plan.queries).toEqual(["Tesla overview", "Tesla revenue trend"]); // capped at 2
-    expect(plan.metrics).toBeUndefined();
-  });
 });
 
 describe("graphStrategy multi-entity query guard", () => {
@@ -418,6 +402,52 @@ describe("graphStrategy multi-entity query guard", () => {
   });
 });
 
+// Per-turn graph memo: gap fills and deep re-splits resolve the SAME entity over and
+// over (observed live: 4 concurrent gap leaves × ~8s each re-resolving one company).
+// Repeat resolves must be free, concurrent resolves must share one request, and a
+// transient failure must not poison the rest of the turn.
+describe("graphStrategy — per-turn graph memo", () => {
+  it("a repeat resolve of the same lookup replays NO graph calls", async () => {
+    h.entityNodesByTerm = { Tesla: [TESLA] };
+    h.relatedByNodeQ = { "tesla-id|revenue": [{ id: "m1", name: "Total Revenue", aliases: [] }] };
+    h.grounded = ["How much Total Revenue did Tesla make?"];
+    const ctx = stubCtx();
+    const first = await graphStrategy.leafQueries(ctx, "q1", lookup(["Tesla"], ["revenue"]));
+    const searchesAfterFirst = h.searchCalls.length;
+    const relatedAfterFirst = h.relatedCalls.length;
+    const second = await graphStrategy.leafQueries(ctx, "q2", lookup(["Tesla"], ["revenue"]));
+    expect(h.searchCalls.length).toBe(searchesAfterFirst); // memo hit — zero new API calls
+    expect(h.relatedCalls.length).toBe(relatedAfterFirst);
+    expect(second.graph).toEqual(first.graph); // the resolved menu is identical either way
+  });
+
+  it("concurrent resolves of the same entity share ONE in-flight request", async () => {
+    h.entityNodesByTerm = { Tesla: [TESLA] };
+    h.relatedByNodeQ = { "tesla-id|revenue": [{ id: "m1", name: "Total Revenue", aliases: [] }] };
+    h.grounded = ["How much Total Revenue did Tesla make?"];
+    const ctx = stubCtx();
+    await Promise.all([
+      graphStrategy.leafQueries(ctx, "q1", lookup(["Tesla"], ["revenue"])),
+      graphStrategy.leafQueries(ctx, "q2", lookup(["Tesla"], ["revenue"])),
+    ]);
+    expect(h.searchCalls.length).toBe(1); // in-flight promise shared, not duplicated
+    expect(h.relatedCalls.length).toBe(1);
+  });
+
+  it("a failed search is NOT cached — the next resolve retries", async () => {
+    h.entityNodesByTerm = { Tesla: [TESLA] };
+    h.relatedByNodeQ = { "tesla-id|revenue": [{ id: "m1", name: "Total Revenue", aliases: [] }] };
+    h.searchErrorByTerm = { Tesla: true };
+    h.grounded = ["How much Total Revenue did Tesla make?"];
+    const ctx = stubCtx();
+    await graphStrategy.leafQueries(ctx, "q1", lookup(["Tesla"], ["revenue"])); // fails, contained as a note
+    h.searchErrorByTerm = {};
+    const plan = await graphStrategy.leafQueries(ctx, "q2", lookup(["Tesla"], ["revenue"]));
+    expect(plan.graph.some((g) => g.entity === "Tesla")).toBe(true); // evicted → retried → resolved
+    expect(h.searchCalls.length).toBe(2);
+  });
+});
+
 describe("graphStrategy — pre-resolved node (lookup.node)", () => {
   it("skips graph/search entirely and fans out metrics for exactly that node", async () => {
     h.relatedByNode["ent::bulls::1"] = [{ id: "m1", name: "Attendance", aliases: [] }];
@@ -433,83 +463,3 @@ describe("graphStrategy — pre-resolved node (lookup.node)", () => {
   });
 });
 
-const REL = (over: Partial<{ key: string; kind: string; label: string; total: number; totalCapped: boolean; items: any[] }>) => ({
-  key: "rel:x", kind: "related", label: "X", total: 1, totalCapped: false, items: [], ...over,
-});
-const NBA_TEAMS = REL({
-  key: "rel:has_team", kind: "related", label: "Has team", total: 30,
-  items: [
-    { id: "ent::bulls::1", name: "Chicago Bulls", type: "entity", aliases: ["Bulls"] },
-    { id: "ent::knicks::1", name: "New York Knicks", type: "entity", aliases: [] },
-  ],
-});
-
-describe("graphStrategy.cohortRoster", () => {
-  it("resolves the anchor, reads the overview, and returns cohort-shaped groups", async () => {
-    h.entityNodesByTerm = { NBA: [{ id: "ent::nba::1", name: "National Basketball Association", type: "entity" }] };
-    h.overviewByNode["ent::nba::1"] = [NBA_TEAMS];
-    const ctx = stubCtx();
-    const roster = await graphStrategy.cohortRoster!(ctx, "NBA teams", lookup(["NBA"], ["attendance"]));
-    expect(roster).not.toBeNull();
-    expect(roster!.anchor.id).toBe("ent::nba::1");
-    expect(roster!.groups).toHaveLength(1);
-    expect(roster!.groups[0]).toMatchObject({ key: "rel:has_team", label: "Has team", total: 30 });
-    expect(roster!.groups[0].members[0]).toEqual({ id: "ent::bulls::1", name: "Chicago Bulls", aliases: ["Bulls"] });
-    expect(roster!.graphCalls.some((c) => c.endpoint === "graph/related")).toBe(true);
-  });
-
-  it("filters data/source kinds always, and sibling only when capped", async () => {
-    h.entityNodesByTerm = { Nvidia: [{ id: "ent::nv::1", name: "NVIDIA Corporation", type: "entity" }] };
-    h.overviewByNode["ent::nv::1"] = [
-      REL({ key: "metrics", kind: "data", label: "Related Metrics", total: 490, items: [{ id: "m1", name: "Revenues" }] }),
-      REL({ key: "sources", kind: "source", label: "Sources", total: 4, items: [{ id: "s1", name: "S&P Global" }] }),
-      REL({ key: "siblings", kind: "sibling", label: "Other Companies", total: 1000, totalCapped: true, items: [{ id: "e1", name: "Amazon.com, Inc." }] }),
-      REL({ key: "part_of", kind: "membership", label: "Part of", total: 2, items: [{ id: "g1", name: "Big Tech" }] }),
-    ];
-    const roster = await graphStrategy.cohortRoster!(stubCtx(), "big tech", lookup(["Nvidia"], ["revenue"]));
-    expect(roster!.groups.map((g) => g.key)).toEqual(["part_of"]);
-  });
-
-  it("dedupes reciprocal groups with identical member-id sets", async () => {
-    const items = [{ id: "e1", name: "Amazon.com, Inc." }, { id: "e2", name: "Microsoft Corporation" }];
-    h.entityNodesByTerm = { Nvidia: [{ id: "ent::nv::1", name: "NVIDIA Corporation", type: "entity" }] };
-    h.overviewByNode["ent::nv::1"] = [
-      REL({ key: "rel:competes_with", label: "Competes with", total: 181, items }),
-      REL({ key: "rel:competitors_of", label: "Competitors of", total: 181, items }),
-    ];
-    const roster = await graphStrategy.cohortRoster!(stubCtx(), "competitors", lookup(["Nvidia"], ["revenue"]));
-    expect(roster!.groups.map((g) => g.key)).toEqual(["rel:competes_with"]);
-  });
-
-  it("returns null (with a note) when the anchor does not resolve", async () => {
-    h.entityNodesByTerm = {}; h.searchNodes = [];
-    const ctx = stubCtx();
-    expect(await graphStrategy.cohortRoster!(ctx, "startups", lookup(["emerging startups"], ["revenue"]))).toBeNull();
-    expect(ctx.notes.some((n) => n.includes("cohort"))).toBe(true);
-  });
-
-  it("returns null when the overview fails or yields no cohort-shaped groups", async () => {
-    h.entityNodesByTerm = { X: [{ id: "x1", name: "X", type: "entity" }] };
-    h.overviewByNode["x1"] = new Error("overview down") as any;
-    const ctx = stubCtx();
-    expect(await graphStrategy.cohortRoster!(ctx, "c", lookup(["X"], ["y"]))).toBeNull();
-    h.overviewByNode["x1"] = [REL({ key: "metrics", kind: "data", items: [{ id: "m", name: "M" }] })];
-    expect(await graphStrategy.cohortRoster!(stubCtx(), "c", lookup(["X"], ["y"]))).toBeNull();
-  });
-
-  it("expand() drills the group by key with the roster limit", async () => {
-    h.entityNodesByTerm = { NBA: [{ id: "ent::nba::1", name: "National Basketball Association", type: "entity" }] };
-    h.overviewByNode["ent::nba::1"] = [NBA_TEAMS];
-    h.relatedByNode["ent::nba::1"] = Array.from({ length: 30 }, (_, i) => ({ id: `t${i}`, name: `Team ${i}`, aliases: [] }));
-    const roster = await graphStrategy.cohortRoster!(stubCtx(), "NBA teams", lookup(["NBA"], ["attendance"]));
-    const full = await roster!.expand("rel:has_team");
-    expect(full).toHaveLength(30);
-    const drill = h.relatedCalls.find((c) => c.relation === "rel:has_team");
-    expect(drill).toBeTruthy();
-    expect(drill.limit).toBe(100);
-  });
-
-  it("searchStrategy does not implement cohortRoster", () => {
-    expect(searchStrategy.cohortRoster).toBeUndefined();
-  });
-});

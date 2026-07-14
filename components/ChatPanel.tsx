@@ -1,9 +1,23 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import type { ChatMsg } from "@/lib/sessions";
-import { IconSend, IconChevronRight, IconX, IconSpark } from "./icons";
+import {
+  IconSend, IconChevronRight, IconX, IconSpark, IconChat,
+  IconSearch, IconChart, IconDoc, IconLink, IconPen,
+} from "./icons";
 import Markdown from "./Markdown";
 import TraceView from "./TraceView";
+
+// Legacy persisted sessions stored emoji as their tool-chip icon. Render those
+// through the app's stroke-icon language; unknown strings fall through as-is.
+const TOOL_CHIP_ICONS: Record<string, ReactNode> = {
+  "🔍": <IconSearch />,
+  "📊": <IconChart />,
+  "📄": <IconDoc />,
+  "🔗": <IconLink />,
+  "✍️": <IconPen />,
+};
 
 export default function ChatPanel({
   away, collapsed, onToggleCollapse, messages, selectionTitles, onClearSelection,
@@ -23,32 +37,40 @@ export default function ChatPanel({
 }) {
   const [text, setText] = useState("");
   const threadRef = useRef<HTMLDivElement>(null);
+  const taRef = useRef<HTMLTextAreaElement>(null);
   const focused = selectionTitles.length > 0;
 
   useEffect(() => {
     threadRef.current?.scrollTo({ top: threadRef.current.scrollHeight, behavior: "smooth" });
   }, [messages.length, loadingStage, loading]);
 
+  // Composer grows with its content (up to ~5 lines) instead of scrolling inside one row.
+  const fitComposer = () => {
+    const ta = taRef.current;
+    if (!ta) return;
+    ta.style.height = "auto";
+    ta.style.height = `${Math.min(ta.scrollHeight, 132)}px`;
+  };
+
   const submit = () => {
     if (!text.trim() || loading) return;
     onSend(text.trim());
     setText("");
+    requestAnimationFrame(fitComposer); // collapse back to one row after clearing
   };
 
   return (
-    <section className={`chat-panel${away ? " away" : ""}${collapsed ? " collapsed" : ""}`}>
+    <>
+    <section className={`chat-panel${away || collapsed ? " away" : ""}`}>
       <div className="panel-head">
-        <button className="icon-btn" onClick={onToggleCollapse} aria-label={collapsed ? "Expand panel" : "Collapse panel"}>
-          <IconChevronRight style={{ transform: collapsed ? "rotate(180deg)" : "none" }} />
-        </button>
-        <div className="assistant-mark"><IconSpark /></div>
         <div className="panel-id">
           <div className="panel-title">Canvas Assistant</div>
           <div className="panel-status"><span className="online" /> Grounded in Tako · live</div>
         </div>
+        <button className="icon-btn" onClick={onToggleCollapse} aria-label="Collapse panel">
+          <IconChevronRight />
+        </button>
       </div>
-
-      <div className="collapsed-rail" onClick={onToggleCollapse}>Assistant</div>
 
       {focused && (
         <div className="focus-banner">
@@ -74,7 +96,7 @@ export default function ChatPanel({
           if (m.kind === "tool") {
             return (
               <div key={m.id} className="tool-chip">
-                <span className="tool-chip-icon">{m.icon}</span>
+                <span className="tool-chip-icon">{(m.icon && TOOL_CHIP_ICONS[m.icon]) ?? m.icon}</span>
                 <span className="tool-chip-label">{m.text}</span>
               </div>
             );
@@ -113,10 +135,11 @@ export default function ChatPanel({
       <div className="composer-wrap">
         <div className="composer side">
           <textarea
+            ref={taRef}
             value={text}
             rows={1}
             placeholder={focused ? "Ask about the selection…" : "Message the assistant…"}
-            onChange={(e) => setText(e.target.value)}
+            onChange={(e) => { setText(e.target.value); fitComposer(); }}
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(); }
             }}
@@ -127,5 +150,14 @@ export default function ChatPanel({
         </div>
       </div>
     </section>
+
+    <button
+      className={`chat-launcher${!away && collapsed ? " show" : ""}`}
+      onClick={onToggleCollapse}
+      aria-label="Open assistant"
+    >
+      <IconChat />
+    </button>
+    </>
   );
 }

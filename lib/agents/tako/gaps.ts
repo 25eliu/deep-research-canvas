@@ -60,11 +60,11 @@ export async function runGapRound(ctx: ResearchCtx, question: string): Promise<G
     const nodeId = uniqueResearchId(ctx, g.question);
     ctx.emit?.({
       type: "reasoning", nodeId, depth: 1, question: g.question, kind: "gap",
-      rationale: g.why, entities: g.entities, subtype: g.subtype ?? undefined, metrics: g.metricFilters,
+      rationale: g.why, entities: g.entities, label: g.label ?? undefined, metrics: g.metricFilters,
     });
     ctx.reasoning.push({ nodeId, question: g.question, rationale: g.why });
     try {
-      const lookup = { entities: g.entities, ...(g.subtype ? { subtype: g.subtype } : {}), metricFilters: g.metricFilters };
+      const lookup = { entities: g.entities, ...(g.label ? { label: g.label } : {}), metricFilters: g.metricFilters };
       return await researchLeaf(g.question, 1, nodeId, false, ctx, lookup, g.why, { gapFill: true });
     } catch (e: unknown) {
       // A single gap-fill leaf failing (e.g. leaf-synth's streamAnswer rethrowing)

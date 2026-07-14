@@ -171,6 +171,17 @@ export default function GraphyHero({ block, width }: { block: GraphyBlock; width
   return (
     <GraphyBoundary>
       <div className="report-graphy" role="img" aria-label={title || "chart"}>
+        {/* Provenance badge: "Graphy" = LLM-modeled from card contents; "converted"
+            = fallback conversion of the report's own chart. Absent source (older
+            persisted reports) reads as modeled — the common case. */}
+        <span
+          className={`graphy-badge${block.source === "fallback" ? " fallback" : ""}`}
+          title={block.source === "fallback"
+            ? "Converted from the report's own chart — Graphy modeling was unavailable this turn"
+            : "Modeled by Graphy from the real card data behind this answer"}
+        >
+          Graphy{block.source === "fallback" ? " · converted" : ""}
+        </span>
         {title ? <div className="report-chart-title">{title}</div> : null}
         {subtitle ? <div className="report-graphy-subtitle">{subtitle}</div> : null}
         {width ? chart : <ResponsiveContainer width="100%" height={height}>{chart}</ResponsiveContainer>}

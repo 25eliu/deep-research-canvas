@@ -172,7 +172,7 @@ export interface ResearchCtx {
   seenSourceUrls: Set<string>; // dedup web sources by url across branches
   sourcesByNode: Map<string, WebSource[]>; // web sources used per answer node → rendered as its "see sources"
   contents: { fetched: number; cap: number; cache: Map<string, string> }; // tako-contents (CSV/text) fetch cache + budget
-  // Per-turn graph-resolve memo: entity searches by (name+subtype), related fan-outs by
+  // Per-turn graph-resolve memo: entity searches by (name+label), related fan-outs by
   // (nodeId+filter+limit). Gap fills and deep re-splits repeatedly resolve the SAME
   // entity (observed: 4 concurrent gap leaves × ~8s each re-resolving one company) —
   // the memo stores in-flight PROMISES so concurrent resolves share one request, and
@@ -277,7 +277,7 @@ export async function researchLeaf(
   if (root) {
     ctx.push([{ op: "add_node", node: synthNode(ctx.rootId, "", "") }]);
     ctx.branchResults.push({ question, claim: "", confidence: found > 0 ? 0.8 : 0.3, figures });
-    ctx.tree.push({ nodeId, depth, question, kind: "leaf", findingCount: found, children: [], queries, rationale, entities, subtype: lookup.subtype, metrics: treeMetrics, graph, calls, graphCalls, graphMs, totalMs: Date.now() - t0, ...(opts?.gapFill ? { gapFill: true } : {}) });
+    ctx.tree.push({ nodeId, depth, question, kind: "leaf", findingCount: found, children: [], queries, rationale, entities, label: lookup.label, metrics: treeMetrics, graph, calls, graphCalls, graphMs, totalMs: Date.now() - t0, ...(opts?.gapFill ? { gapFill: true } : {}) });
     return { nodeId, title: question, synthesis: "", findingCount: found, children: [], depth, kind: "leaf" };
   }
 
@@ -311,7 +311,7 @@ export async function researchLeaf(
     ...(queries.length ? { searches: queries } : {}),
     ...(leafSources.length ? { sources: leafSources } : {}),
   } }]);
-  ctx.tree.push({ nodeId, depth, question, kind: "leaf", findingCount: found, children: [], queries, rationale, entities, subtype: lookup.subtype, metrics: treeMetrics, graph, calls, graphCalls, graphMs, totalMs: Date.now() - t0, ...(opts?.gapFill ? { gapFill: true } : {}) });
+  ctx.tree.push({ nodeId, depth, question, kind: "leaf", findingCount: found, children: [], queries, rationale, entities, label: lookup.label, metrics: treeMetrics, graph, calls, graphCalls, graphMs, totalMs: Date.now() - t0, ...(opts?.gapFill ? { gapFill: true } : {}) });
   return { nodeId, title: question, synthesis: prose, findingCount: found, children: [], depth, kind: "leaf", claim, confidence: 0.8 };
 }
 

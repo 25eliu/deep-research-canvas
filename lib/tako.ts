@@ -186,20 +186,38 @@ export async function takoContents(
   return out;
 }
 
+const ANSWER_WEB_COUNT = 8; // web articles requested when grounding a plan from current sources
+
 export async function takoAnswer(
   query: string,
-  opts: { effort?: "fast" | "instant"; onCall?: (m: TakoCallMeta) => void } = {},
+  opts: { effort?: "fast" | "instant"; web?: boolean; onCall?: (m: TakoCallMeta) => void } = {},
 ): Promise<{ answer: string; cards: TakoCard[] }> {
   const effort = opts.effort || "fast";
+  const web = !!opts.web;
+  // Grounding wants CURRENT ARTICLES, not the structured-data default. /v1/answer with
+  // sources.web returns web_results[] (recent web sources) and writes the answer FROM
+  // them; without it the answer over-weights whatever entity happens to hold a Tako card
+  // (e.g. an obscure company with a stock page), which is poor grounding for discovering a
+  // cohort's real members. Verified on staging: web-only surfaced the actual sector
+  // leaders where the default surfaced a near-random card-backed name.
+  const body: Record<string, unknown> = web
+    ? { query, effort, sources: { web: { count: ANSWER_WEB_COUNT } } }
+    : { query, effort };
   const t0 = Date.now();
   try {
-    const data = await post("/v1/answer", { query, effort });
-    const cards = keepCards(data?.cards || [], query);
-    opts.onCall?.({ query, endpoint: "/v1/answer", effort, web: false, ms: Date.now() - t0, cards });
+    const data = await post("/v1/answer", body);
+    // A web-grounded answer returns its sources in web_results[] (like /v3/search), NOT
+    // cards[]; fold them into the returned cards so CARD_TITLES carries the article titles.
+    const structured = keepCards(data?.cards || [], query);
+    const webCards = web
+      ? (data?.web_results || []).map(mapWebResult).filter((c: TakoCard) => !!c.cardId)
+      : [];
+    const cards = [...structured, ...webCards];
+    opts.onCall?.({ query, endpoint: "/v1/answer", effort, web, ms: Date.now() - t0, cards });
     return { answer: typeof data?.answer === "string" ? data.answer : "", cards };
   } catch (e: unknown) {
     opts.onCall?.({
-      query, endpoint: "/v1/answer", effort, web: false, ms: Date.now() - t0, cards: [],
+      query, endpoint: "/v1/answer", effort, web, ms: Date.now() - t0, cards: [],
       error: e instanceof Error ? e.message : String(e),
     });
     throw e;

@@ -3,6 +3,7 @@ import type { EmitFn, PipelineResult, Timings, TakoCallRecord, RouteAction } fro
 import { streamAnswer } from "../../llm";
 import { takoAnswer } from "../../tako";
 import { FindingLedger } from "./findings";
+import { feedsEdge } from "./flow";
 import { FOLLOWUP_ANSWER_SYSTEM } from "./prompts";
 import { ctxBlock } from "../shared/ctx";
 import { retrieveNodes } from "../shared/retrieval";
@@ -38,6 +39,11 @@ export async function runTakoFollowup(
   const boardCanAnswer = retrieved.length > 0;
   const needsTako = answerEnabled && (wantsNewData || !boardCanAnswer);
 
+  // This lane's calls/synthesis events all key on nodeId "followup", which has no
+  // research-tree entry — without a reasoning step the trace renders it as an
+  // "(unnamed step)". Name it with the user's question up front.
+  emit?.({ type: "reasoning", nodeId: "followup", depth: 0, question: req.message, kind: "leaf" });
+
   let answer = "";
   let t = Date.now();
   if (needsTako) {
@@ -57,12 +63,25 @@ export async function runTakoFollowup(
         },
       });
       answer = res.answer;
+      // New cards must be ANCHORED with a feeds edge or the tree layout leaves them
+      // position-less (stacked invisibly at 0,0 on any board with a research tree).
+      // Anchor = the selection-first retrieved node (the node the follow-up is
+      // about), else the board's synthesis node; a tree-less board needs no anchor
+      // (the structured layout places every data card).
+      const anchor = retrieved[0]?.id
+        ?? req.canvasState.nodes.find((n) => n.role === "synthesis")?.id;
       for (const c of res.cards) {
         const f = ledger.add(c);
         if (f && toBoard) {
-          nodeOps.push({ op: "add_node", node: ledger.toNode(f) });
+          const ops: CanvasOp[] = [
+            { op: "add_node", node: ledger.toNode(f) },
+            // Web findings render as role:"source" nodes, which the layout places
+            // on its own — only embedded chart cards need the anchor edge.
+            ...(anchor && f.kind === "data_card" ? [feedsEdge(f.nodeId, anchor)] : []),
+          ];
+          nodeOps.push(...ops);
           allowedNodeIds.add(f.nodeId);
-          emit?.({ type: "ops", ops: [{ op: "add_node", node: ledger.toNode(f) }] });
+          emit?.({ type: "ops", ops });
         }
       }
     } catch (e: unknown) {
@@ -114,6 +133,9 @@ export async function runTakoFollowup(
       answerUsed: takoAnswerUsed,
       cards: ledger.list().map((f) => ({ id: f.card.cardId, title: f.title, url: f.url || "" })),
       calls,
+      // No tree on this lane — the finalized trace rebuilds from calls + reasoning,
+      // and this entry keeps the "followup" step named after the turn completes.
+      reasoning: [{ nodeId: "followup", question: req.message, rationale: "" }],
       notes,
       groundedIn: {
         nodes: retrieved.map((n) => ({ id: n.id, title: n.title })),

@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { zCanvasOps } from "../../schema";
-import { GRAPH_ENTITY_SUBTYPES } from "./graph-subtypes";
+import { GRAPH_LABELS } from "./graph-labels";
 
 // The composed answer report lives in schema.ts (it's a canvas-node field); re-export
 // here so agent code has one import site for all agent schemas.
@@ -52,24 +52,24 @@ export type BranchResult = z.infer<typeof zBranchResult>;
 
 // Entity-first graph lookup carried by every research question: 1-3 COMPLETELY
 // DIFFERENT candidate names the graph might register the SAME subject under
-// ("Google", "Alphabet"), an optional entity-class filter for graph/search's
-// `subtype` param (z.enum = the schema guarantee; .nullable().optional() because
-// OpenAI strict structured outputs is off — see CLAUDE.md — and Zod + auto-retry
-// enforce it instead), and 1-5 short substring filters for the related-metrics
-// fetch's case-insensitive `q` param ("revenue", "sales", "margin") — a LIST of
-// name-fragment variants, so one filter missing how a series is actually named
-// doesn't blank the whole lookup.
+// ("Google", "Alphabet"), an optional NER `label` for graph/search's `label` param
+// — a RANKING BOOST (not a filter) that ranks matching-label nodes higher (z.enum =
+// the schema guarantee; .nullable().optional() because OpenAI strict structured
+// outputs is off — see CLAUDE.md — and Zod + auto-retry enforce it instead), and 1-5
+// short substring filters for the related-metrics fetch's case-insensitive `q` param
+// ("revenue", "sales", "margin") — a LIST of name-fragment variants, so one filter
+// missing how a series is actually named doesn't blank the whole lookup.
 const zLookup = {
   entities: z.array(z.string().min(1)).min(1).max(3),
-  subtype: z.enum(GRAPH_ENTITY_SUBTYPES).nullable().optional(),
+  label: z.enum(GRAPH_LABELS).nullable().optional(),
   metricFilters: z.array(z.string().min(1)).min(1).max(5),
 };
 
-// The plain-object shape of zLookup that flows through the pipeline (subtype
+// The plain-object shape of zLookup that flows through the pipeline (label
 // normalized to undefined; strategy/flow/gaps all consume this).
 export interface GraphLookup {
   entities: string[];
-  subtype?: string;
+  label?: string;
   metricFilters: string[];
   // Pre-resolved graph node (e.g. a cohort-roster member): resolveGraph skips the
   // entity search and fans out metrics for exactly this node. Set ONLY by code —

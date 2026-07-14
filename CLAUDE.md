@@ -5,9 +5,14 @@
 - Staging has its OWN key namespace: prod `tako.com` keys 401 on staging and vice-versa.
 - Search: `POST /api/v3/search` `{query, effort, sources:{data:{count}}}` → `{cards:[{card_id,title,embed_url,webpage_url,image_url,sources,card_type,...}]}`.
 - Answer: `POST /api/v1/answer` `{query, effort}` → `{answer, cards:[...]}` (grounded prose + citable cards).
-- Graph: `GET /api/beta/graph/search?q&types=entity|metric[&subtype]` → `{results:[...]}`;
-  `GET /api/beta/graph/related?node_id&relation_type&q` → items live in **`relation.items`** (NOT `results`).
+- Graph: `GET /api/beta/graph/search?q&types=entity|metric[&label]` → `{results:[...]}`;
+  `GET /api/beta/graph/related?node_id&relation_type&q[&label]` → items live in **`relation.items`** (NOT `results`).
   Always pass `q` on related (unfiltered = tens of thousands of items).
+- **`subtype` was REMOVED** (2026-07-14) — sending it 400s. Use `label` instead: a RANKING BOOST
+  (not a filter — nothing is excluded, totals unchanged; supplying it disables label inference).
+  Valid values (fixed 11-value NER enum): `PERSON, ORG, GPE, LOC, PRODUCT, EVENT, LANGUAGE, MONEY,
+  METRIC, STOCK_TICKER, WEBSITE`. An out-of-enum value 400s (`Invalid label`). `subtype` still appears
+  as a RESPONSE field. The metric fan-out on `/related` passes `label=METRIC` to rank metric items up.
 - Card embeds post height via a `tako::resize` postMessage — do not hard-code iframe heights.
 
 ## Providers

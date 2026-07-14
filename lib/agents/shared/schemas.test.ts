@@ -1,14 +1,14 @@
 import { describe, it, expect } from "vitest";
 import { zResearchPlan, zAnswerBlock, zGapPlan } from "./schemas";
-import { GRAPH_ENTITY_SUBTYPES } from "./graph-subtypes";
+import { GRAPH_LABELS, GRAPH_LABELS_LINE } from "./graph-labels";
 
 // Every research question is an entity-first LOOKUP: 1-3 candidate NAMES for one
-// subject (entity-namespace graph search), an OPTIONAL entity-class subtype (must be
-// one of Tako's fixed graph classes — z.enum is the enforcement point), and 1-3 short
-// metricFilters (substring filters for the related-metrics fetch). A plan missing
-// names or filters must fail validation so generateObject retries the LLM call
+// subject (entity-namespace graph search), an OPTIONAL NER label (must be one of the
+// fixed graph labels — z.enum is the enforcement point — a ranking boost, not a filter),
+// and 1-3 short metricFilters (substring filters for the related-metrics fetch). A plan
+// missing names or filters must fail validation so generateObject retries the LLM call
 // instead of silently proceeding half-grounded.
-describe("zResearchPlan — entity-first lookup (entities + subtype + metricFilters)", () => {
+describe("zResearchPlan — entity-first lookup (entities + label + metricFilters)", () => {
   const sub = { question: "nvidia revenue", entities: ["NVIDIA Corporation"], metricFilters: ["revenue"] };
   const base = { atomic: true, rationale: "direct", entities: ["Apple Inc."], metricFilters: ["income"] };
 
@@ -27,16 +27,16 @@ describe("zResearchPlan — entity-first lookup (entities + subtype + metricFilt
     expect(zResearchPlan.safeParse({ ...base, metricFilters: ["a", "b", "c", "d", "e", "f"] }).success).toBe(false);
   });
 
-  it("accepts a valid subtype enum value, null, and absent", () => {
-    expect(zResearchPlan.safeParse({ ...base, subtype: "Companies" }).success).toBe(true);
-    expect(zResearchPlan.safeParse({ ...base, subtype: "Sports Leagues" }).success).toBe(true);
-    expect(zResearchPlan.safeParse({ ...base, subtype: null }).success).toBe(true);
+  it("accepts a valid label enum value, null, and absent", () => {
+    expect(zResearchPlan.safeParse({ ...base, label: "ORG" }).success).toBe(true);
+    expect(zResearchPlan.safeParse({ ...base, label: "GPE" }).success).toBe(true);
+    expect(zResearchPlan.safeParse({ ...base, label: null }).success).toBe(true);
     expect(zResearchPlan.safeParse(base).success).toBe(true);
   });
 
-  it("rejects a subtype outside the fixed enum", () => {
-    expect(zResearchPlan.safeParse({ ...base, subtype: "Company" }).success).toBe(false);
-    expect(zResearchPlan.safeParse({ ...base, subtype: "companies" }).success).toBe(false);
+  it("rejects a label outside the fixed enum", () => {
+    expect(zResearchPlan.safeParse({ ...base, label: "Companies" }).success).toBe(false);
+    expect(zResearchPlan.safeParse({ ...base, label: "org" }).success).toBe(false);
   });
 
   it("rejects a plan missing either half of the lookup", () => {
@@ -51,12 +51,12 @@ describe("zResearchPlan — entity-first lookup (entities + subtype + metricFilt
     expect(zResearchPlan.safeParse({ ...base, metricFilters: [""] }).success).toBe(false);
   });
 
-  it("rejects a sub-question missing its lookup or with a bad subtype", () => {
+  it("rejects a sub-question missing its lookup or with a bad label", () => {
     const { metricFilters: _m, ...subNoFilters } = sub;
     expect(zResearchPlan.safeParse({ ...base, atomic: false, subQuestions: [sub, subNoFilters] }).success).toBe(false);
     expect(zResearchPlan.safeParse({ ...base, atomic: false, subQuestions: [{ ...sub, entities: [] }] }).success).toBe(false);
-    expect(zResearchPlan.safeParse({ ...base, atomic: false, subQuestions: [{ ...sub, subtype: "Company" }] }).success).toBe(false);
-    expect(zResearchPlan.safeParse({ ...base, atomic: false, subQuestions: [{ ...sub, subtype: "Countries" }] }).success).toBe(true);
+    expect(zResearchPlan.safeParse({ ...base, atomic: false, subQuestions: [{ ...sub, label: "Company" }] }).success).toBe(false);
+    expect(zResearchPlan.safeParse({ ...base, atomic: false, subQuestions: [{ ...sub, label: "GPE" }] }).success).toBe(true);
   });
 
   it("rejects the old singular entity/metric shape", () => {
@@ -65,16 +65,22 @@ describe("zResearchPlan — entity-first lookup (entities + subtype + metricFilt
   });
 });
 
-describe("GRAPH_ENTITY_SUBTYPES — the fixed Tako graph entity-class list", () => {
-  it("has all 84 documented classes, spot-checked at both ends", () => {
-    expect(GRAPH_ENTITY_SUBTYPES).toHaveLength(84);
-    expect(GRAPH_ENTITY_SUBTYPES[0]).toBe("Companies");
-    expect(GRAPH_ENTITY_SUBTYPES).toContain("Countries");
-    expect(GRAPH_ENTITY_SUBTYPES).toContain("LLMs");
-    expect(GRAPH_ENTITY_SUBTYPES[GRAPH_ENTITY_SUBTYPES.length - 1]).toBe("Sports Leagues");
+describe("GRAPH_LABELS — the fixed Tako graph NER label list", () => {
+  it("has all 11 documented labels, spot-checked", () => {
+    expect(GRAPH_LABELS).toHaveLength(11);
+    expect(GRAPH_LABELS[0]).toBe("PERSON");
+    expect(GRAPH_LABELS).toContain("ORG");
+    expect(GRAPH_LABELS).toContain("GPE");
+    expect(GRAPH_LABELS).toContain("METRIC");
+    expect(GRAPH_LABELS[GRAPH_LABELS.length - 1]).toBe("WEBSITE");
   });
   it("contains no duplicates", () => {
-    expect(new Set(GRAPH_ENTITY_SUBTYPES).size).toBe(GRAPH_ENTITY_SUBTYPES.length);
+    expect(new Set(GRAPH_LABELS).size).toBe(GRAPH_LABELS.length);
+  });
+  it("GRAPH_LABELS_LINE joins every label for prompt interpolation", () => {
+    expect(GRAPH_LABELS_LINE).toContain("ORG");
+    expect(GRAPH_LABELS_LINE).toContain("STOCK_TICKER");
+    expect(GRAPH_LABELS_LINE.split(", ")).toHaveLength(11);
   });
 });
 
@@ -122,16 +128,16 @@ describe("zAnswerBlock — new question-shaped kinds", () => {
 
 describe("zGapPlan — gap-analysis output", () => {
   const gap = { question: "amd revenue", entities: ["Advanced Micro Devices"], metricFilters: ["revenue"], why: "missing comparison half" };
-  it("accepts sufficient with empty gaps, and a gap list (with optional subtype)", () => {
+  it("accepts sufficient with empty gaps, and a gap list (with optional label)", () => {
     expect(zGapPlan.safeParse({ sufficient: true, rationale: "covered", gaps: [] }).success).toBe(true);
     expect(zGapPlan.safeParse({ sufficient: false, rationale: "one side missing", gaps: [gap] }).success).toBe(true);
-    expect(zGapPlan.safeParse({ sufficient: false, rationale: "r", gaps: [{ ...gap, subtype: "Companies" }] }).success).toBe(true);
+    expect(zGapPlan.safeParse({ sufficient: false, rationale: "r", gaps: [{ ...gap, label: "ORG" }] }).success).toBe(true);
   });
-  it("rejects a gap missing its lookup, with empty members, or a non-enum subtype", () => {
+  it("rejects a gap missing its lookup, with empty members, or a non-enum label", () => {
     const { metricFilters: _m, ...noFilters } = gap;
     expect(zGapPlan.safeParse({ sufficient: false, rationale: "r", gaps: [noFilters] }).success).toBe(false);
     expect(zGapPlan.safeParse({ sufficient: false, rationale: "r", gaps: [{ ...gap, entities: [""] }] }).success).toBe(false);
-    expect(zGapPlan.safeParse({ sufficient: false, rationale: "r", gaps: [{ ...gap, subtype: "Company" }] }).success).toBe(false);
+    expect(zGapPlan.safeParse({ sufficient: false, rationale: "r", gaps: [{ ...gap, label: "Company" }] }).success).toBe(false);
   });
 });
 
@@ -167,7 +173,7 @@ describe("zComponentPlan", () => {
   it("accepts a full plan", () => {
     const plan = zComponentPlan.parse({
       question: "AMD data-center revenue", rationale: "user asked for a chart",
-      entities: ["Advanced Micro Devices", "AMD"], subtype: "Companies", metricFilters: ["revenue", "data center"],
+      entities: ["Advanced Micro Devices", "AMD"], label: "ORG", metricFilters: ["revenue", "data center"],
     });
     expect(plan.question).toBe("AMD data-center revenue");
   });

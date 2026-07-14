@@ -77,7 +77,7 @@ vi.mock("../../llm", () => ({
 vi.mock("./graph", () => ({
   // Entity searches echo the query back as the resolved node (the entity-first flow
   // never searches the metric namespace; strategy.test.ts locks that).
-  graphSearch: vi.fn(async (name: string) => [{ id: `${name}-id`, name, type: "entity" }]),
+  graphSearch: vi.fn(async (name: string, opts: any) => [{ id: `${name}-id`, name, type: "entity", ...(opts?.label ? { label: opts.label } : {}) }]),
   graphRelated: vi.fn(async () => h.related.map((name, i) => ({ id: `m${i}`, name, aliases: [] }))),
 }));
 
@@ -111,7 +111,7 @@ const req = {
 const twoBranchPlan = {
   atomic: false, rationale: "Split into per-company revenue to compare them.", entities: ["Nvidia"], metricFilters: ["Revenue"],
   subQuestions: [
-    { question: "nvidia revenue", entities: ["Nvidia"], subtype: "Companies", metricFilters: ["Revenue"] },
+    { question: "nvidia revenue", entities: ["Nvidia"], label: "ORG", metricFilters: ["Revenue"] },
     { question: "amd revenue", entities: ["AMD"], metricFilters: ["Revenue"] },
   ],
 };
@@ -178,14 +178,14 @@ describe("runTakoInitial — recursive research tree", () => {
     const nvidiaLeaf = result.trace.tree?.find((n) => n.question === "nvidia revenue");
     expect(nvidiaLeaf?.calls?.some((c) => c.cards.some((card) => card.id === "nvda"))).toBe(true);
 
-    // entity-first lookup visibility: the planner's subtype survives onto the tree
+    // entity-first lookup visibility: the planner's label survives onto the tree
     // node, the live reasoning event, and each related graph call carries the
     // resolved entity's display name (subject) for the trace drill-down.
-    expect(nvidiaLeaf?.subtype).toBe("Companies");
-    expect(nvidiaLeaf?.graphCalls?.some((c) => c.endpoint === "graph/search" && c.params.subtype === "Companies")).toBe(true);
+    expect(nvidiaLeaf?.label).toBe("ORG");
+    expect(nvidiaLeaf?.graphCalls?.some((c) => c.endpoint === "graph/search" && c.params.label === "ORG")).toBe(true);
     expect(nvidiaLeaf?.graphCalls?.filter((c) => c.endpoint === "graph/related").every((c) => c.subject === "Nvidia")).toBe(true);
     const reasoningEvt = events.find((e) => e.type === "reasoning" && (e as any).question === "nvidia revenue") as any;
-    expect(reasoningEvt?.subtype).toBe("Companies");
+    expect(reasoningEvt?.label).toBe("ORG");
   });
 
   it("drops answer-report numbers not traceable to a gathered figure", async () => {
@@ -469,7 +469,7 @@ describe("runTakoInitial — split-intent decompose guard", () => {
   const inflationReq = { ...req, message: "What's driving inflation this year?" };
   const brokenSplit = {
     atomic: false, rationale: "should be split into the main contributing facets",
-    entities: ["United States"], subtype: "Countries", metricFilters: ["inflation"],
+    entities: ["United States"], label: "GPE", metricFilters: ["inflation"],
   }; // no subQuestions, no cohort — invalid split intent
   const facetSubs = [
     { question: "energy prices driving inflation", entities: ["United States"], metricFilters: ["energy"] },

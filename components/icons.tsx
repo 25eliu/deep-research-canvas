@@ -43,6 +43,9 @@ export const IconSpark = (p: SVGProps<SVGSVGElement>) => (
 export const IconMinus = (p: SVGProps<SVGSVGElement>) => (
   <svg {...s(p)}><path d="M5 12h14" /></svg>
 );
+export const IconChat = (p: SVGProps<SVGSVGElement>) => (
+  <svg {...s(p)}><path d="M21 12a8 8 0 0 1-8 8H4l2.4-2.9A8 8 0 1 1 21 12z" /></svg>
+);
 export const IconFit = (p: SVGProps<SVGSVGElement>) => (
   <svg {...s(p)}><path d="M4 9V5a1 1 0 0 1 1-1h4M15 4h4a1 1 0 0 1 1 1v4M20 15v4a1 1 0 0 1-1 1h-4M9 20H5a1 1 0 0 1-1-1v-4" /></svg>
 );
@@ -65,4 +68,20 @@ export const IconSynthesis = (p: SVGProps<SVGSVGElement>) => (
 // Braces — the LLM reasoning step.
 export const IconReasoning = (p: SVGProps<SVGSVGElement>) => (
   <svg {...s(p)}><path d="M9 4c-2 0-2 2-2 4s0 2-2 4c2 2 2 2 2 4s0 4 2 4M15 4c2 0 2 2 2 4s0 2 2 4c-2 2-2 2-2 4s0 4-2 4" /></svg>
+);
+// Bar chart — a data/visualization step (legacy tool-chip 📊).
+export const IconChart = (p: SVGProps<SVGSVGElement>) => (
+  <svg {...s(p)}><path d="M4 20h16M7 20v-6M12 20V9M17 20v-9" /></svg>
+);
+// Document — a content/summary step (legacy tool-chip 📄).
+export const IconDoc = (p: SVGProps<SVGSVGElement>) => (
+  <svg {...s(p)}><path d="M7 3h7l4 4v13a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1zM14 3v4h4M9 12h6M9 16h6" /></svg>
+);
+// Chain link — a linking/citation step (legacy tool-chip 🔗).
+export const IconLink = (p: SVGProps<SVGSVGElement>) => (
+  <svg {...s(p)}><path d="M10 14a4 4 0 0 0 6 0l3-3a4 4 0 0 0-6-6l-1.5 1.5M14 10a4 4 0 0 0-6 0l-3 3a4 4 0 0 0 6 6l1.5-1.5" /></svg>
+);
+// Pen — a writing/synthesis step (legacy tool-chip ✍️).
+export const IconPen = (p: SVGProps<SVGSVGElement>) => (
+  <svg {...s(p)}><path d="M4 20l1-4L16 5a2.1 2.1 0 0 1 3 3L8 19l-4 1z" /><path d="M14 7l3 3" /></svg>
 );

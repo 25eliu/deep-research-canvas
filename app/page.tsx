@@ -147,7 +147,7 @@ export default function Page() {
           if (evt.type === "trace") {
             setLoadingStage(evt.stage as string); // lightweight status label only
           } else if (evt.type === "reasoning") {
-            pushStep({ t: "reasoning", nodeId: evt.nodeId, depth: evt.depth, question: evt.question, kind: evt.kind, rationale: evt.rationale, entities: evt.entities, subtype: evt.subtype, metrics: evt.metrics, subQuestions: evt.subQuestions });
+            pushStep({ t: "reasoning", nodeId: evt.nodeId, depth: evt.depth, question: evt.question, kind: evt.kind, rationale: evt.rationale, entities: evt.entities, label: evt.label, metrics: evt.metrics, subQuestions: evt.subQuestions });
           } else if (evt.type === "tako_call") {
             pushStep({ t: "tako", call: evt.call });
           } else if (evt.type === "graphy") {

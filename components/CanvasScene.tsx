@@ -1,7 +1,8 @@
 "use client";
 import { useMemo } from "react";
 import type { CanvasNode, CanvasEdge } from "@/lib/schema";
-import { nodeWidth, nodeHeight, EDGE_COLOR, type Band, LAYOUT_LABEL_X } from "@/lib/layout";
+import { nodeWidth, nodeHeight, EDGE_COLOR } from "@/lib/layout";
+import { getAncestors, getDescendants } from "@/lib/lineage";
 import NodeCard from "./NodeCard";
 
 type Pos = Record<string, { x: number; y: number }>;
@@ -33,7 +34,7 @@ function ctrl(p: { x: number; y: number; s: Side }, off: number) {
 }
 
 export default function CanvasScene({
-  nodes, edges, pos, sceneRef, draggingId, bands, selection, collapsed, heights,
+  nodes, edges, pos, sceneRef, draggingId, selection, collapsed, heights,
   onSelect, onDragStart, onToggleCollapse, onMeasure, nodeById,
 }: {
   nodes: CanvasNode[];
@@ -41,7 +42,6 @@ export default function CanvasScene({
   pos: Pos;
   sceneRef: React.RefObject<HTMLDivElement>;
   draggingId: string | null;
-  bands: Band[];
   selection: string[];
   collapsed: Record<string, boolean>;
   heights: Record<string, number>;
@@ -62,21 +62,29 @@ export default function CanvasScene({
     return m;
   }, [edges]);
 
-  // Click a node → light up every edge touching it and the nodes on the other end.
+  // Click a node → light up its whole lineage: every ancestor up to the root, its full
+  // descendant subtree, and the edges whose both ends are in that lit set.
   const { active, litEdges, litNodes } = useMemo(() => {
-    const sel = new Set(selection);
-    const litEdges = new Set<string>();
     const litNodes = new Set<string>(selection);
-    if (sel.size) {
-      for (const e of edges)
-        if (sel.has(e.from) || sel.has(e.to)) {
-          litEdges.add(e.id);
-          litNodes.add(e.from);
-          litNodes.add(e.to);
-        }
+    for (const id of selection) {
+      for (const a of getAncestors(id, edges)) litNodes.add(a);
+      for (const d of getDescendants(id, edges)) litNodes.add(d);
     }
-    return { active: sel.size > 0, litEdges, litNodes };
+    const litEdges = new Set<string>();
+    if (selection.length)
+      for (const e of edges)
+        if (litNodes.has(e.from) && litNodes.has(e.to)) litEdges.add(e.id);
+    return { active: selection.length > 0, litEdges, litNodes };
   }, [selection, edges]);
+
+  // The dragged node moves with its whole subtree — treat every member as "dragging" so
+  // their transitions pause and their stale edges fade together.
+  const movingIds = useMemo(() => {
+    if (!draggingId) return null;
+    const s = getDescendants(draggingId, edges);
+    s.add(draggingId);
+    return s;
+  }, [draggingId, edges]);
 
   // Draw dimmed edges first, lit edges last (on top).
   const orderedEdges = useMemo(
@@ -99,37 +107,34 @@ export default function CanvasScene({
           const w = active ? (lit ? 2.4 : 1.2) : 1.6;
           // A dragged node's edges are stale (paths recompute on drop) — fade them so the
           // transient detachment reads as intentional rather than broken.
-          const touchesDrag = !!draggingId && (edge.from === draggingId || edge.to === draggingId);
+          const touchesDrag = !!movingIds && (movingIds.has(edge.from) || movingIds.has(edge.to));
           const op = touchesDrag ? 0.1 : active ? (lit ? 1 : 0.08) : 0.7;
+          const d = `M${s.x},${s.y} C${ctrl(s, off)} ${ctrl(t, off)} ${t.x},${t.y}`;
+          // Cards glide to their slot when the layout reflows (see the node wrappers below);
+          // ease the edge geometry on the same clock so lines stay attached to their boxes.
+          // CSS `d`/`cx`/`cy` transitions cover evergreen browsers; the attributes remain
+          // the functional fallback (edges just snap where unsupported).
+          const glide = draggingId ? "none" : undefined;
           return (
             <g key={edge.id} style={{ transition: "opacity .2s", opacity: op }}>
               <path
-                d={`M${s.x},${s.y} C${ctrl(s, off)} ${ctrl(t, off)} ${t.x},${t.y}`}
+                d={d}
                 fill="none" stroke={color} strokeWidth={w} strokeLinecap="round"
-                style={{ transition: "stroke-width .15s" }}
+                style={{ d: `path("${d}")`, transition: glide ?? "d .32s var(--ease), stroke-width .15s" }}
               />
               {/* connection ports where the line meets each box */}
-              <circle cx={s.x} cy={s.y} r={lit ? 4 : 3} fill={color} stroke="var(--surface)" strokeWidth={1.5} />
-              <circle cx={t.x} cy={t.y} r={lit ? 4 : 3} fill={color} stroke="var(--surface)" strokeWidth={1.5} />
+              <circle cx={s.x} cy={s.y} r={lit ? 4 : 3} fill={color} stroke="var(--surface)" strokeWidth={1.5}
+                style={{ transition: glide ?? "cx .32s var(--ease), cy .32s var(--ease)" }} />
+              <circle cx={t.x} cy={t.y} r={lit ? 4 : 3} fill={color} stroke="var(--surface)" strokeWidth={1.5}
+                style={{ transition: glide ?? "cx .32s var(--ease), cy .32s var(--ease)" }} />
             </g>
           );
         })}
       </svg>
 
-      {/* Band labels on the left rail */}
-      {bands.map((band) => (
-        <div
-          key={band.label}
-          className="band-label"
-          style={{ left: LAYOUT_LABEL_X - 6, top: band.y - 30 }}
-        >
-          {band.label}
-        </div>
-      ))}
-
       {nodes.map((n) => {
         const dim = active && !litNodes.has(n.id);
-        const dragging = draggingId === n.id;
+        const dragging = !!movingIds?.has(n.id);
         return (
           <div
             key={n.id}
@@ -144,7 +149,11 @@ export default function CanvasScene({
               filter: dim ? "saturate(0.6)" : "none",
               zIndex: dragging ? 10 : undefined,
               // The dragged wrapper is moved imperatively via style.transform; don't ease it.
-              transition: dragging ? "none" : "opacity .22s var(--ease), filter .22s var(--ease)",
+              // Everyone else GLIDES to their slot when the layout reflows (new cards
+              // streaming in, embed heights settling) instead of teleporting.
+              transition: dragging
+                ? "none"
+                : "left .32s var(--ease), top .32s var(--ease), opacity .22s var(--ease), filter .22s var(--ease)",
               cursor: dragging ? "grabbing" : "grab",
               touchAction: "none",
             }}

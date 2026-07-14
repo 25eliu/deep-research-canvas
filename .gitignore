@@ -7,3 +7,6 @@ node_modules/
 *.tsbuildinfo
 next-env.d.ts
 .gstack/
+
+# Internal agent planning/spec docs — kept locally, not published
+docs/superpowers/

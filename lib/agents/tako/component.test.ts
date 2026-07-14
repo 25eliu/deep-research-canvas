@@ -50,7 +50,7 @@ beforeEach(() => {
   // Setup generateStructured mock
   h.mockGenerateStructured.mockResolvedValue({
     question: "AMD data-center revenue", rationale: "user asked",
-    entities: ["Advanced Micro Devices", "AMD"], subtype: "Companies", metricFilters: ["revenue"],
+    entities: ["Advanced Micro Devices", "AMD"], label: "ORG", metricFilters: ["revenue"],
   });
 
   // Setup researchLeaf mock
@@ -76,7 +76,7 @@ describe("runComponentLane", () => {
     expect(depth).toBe(1);
     expect(root).toBe(false);
     expect(String(nodeId)).toMatch(/^rq_/);
-    expect(lookup).toEqual({ entities: ["Advanced Micro Devices", "AMD"], subtype: "Companies", metricFilters: ["revenue"] });
+    expect(lookup).toEqual({ entities: ["Advanced Micro Devices", "AMD"], label: "ORG", metricFilters: ["revenue"] });
   });
 
   it("anchors the new node to the selection with a derived_from edge", async () => {

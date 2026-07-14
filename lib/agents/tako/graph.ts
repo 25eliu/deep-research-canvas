@@ -5,7 +5,7 @@ const HOST = process.env.TAKO_HOST || "https://staging.tako.com";
 const BASE = `${HOST}/api/beta/graph`;
 const TIMEOUT_MS = 15_000;
 
-export interface GraphNode { id: string; name: string; type: string; subtype?: string; aliases?: string[]; description?: string; }
+export interface GraphNode { id: string; name: string; type: string; subtype?: string; label?: string; aliases?: string[]; description?: string; }
 export interface GraphItem { id: string; name: string; aliases?: string[]; description?: string; }
 
 async function get(path: string): Promise<any> {
@@ -38,41 +38,17 @@ async function get(path: string): Promise<any> {
   }
 }
 
+// Entity resolution only — the metric namespace is never searched (metrics come from
+// graphRelated's "metrics" relation). `label` is an NER ranking boost (see graph-labels.ts):
+// it ranks matching-label nodes higher but excludes nothing; totals are unchanged.
 export async function graphSearch(
   q: string,
-  opts: { types: "entity" | "metric"; subtype?: string; limit?: number },
+  opts: { label?: string; limit?: number },
 ): Promise<GraphNode[]> {
-  const p = new URLSearchParams({ q, types: opts.types, limit: String(opts.limit ?? 5) });
-  if (opts.subtype && opts.types === "entity") p.set("subtype", opts.subtype);
+  const p = new URLSearchParams({ q, types: "entity", limit: String(opts.limit ?? 5) });
+  if (opts.label) p.set("label", opts.label);
   const data = await get(`/search?${p.toString()}`);
   return Array.isArray(data?.results) ? data.results : [];
-}
-
-// One relation group from the /related OVERVIEW form (no relation param): a stable
-// key (fixed like "metrics"/"siblings" or a named edge like "rel:competes_with"),
-// a kind (related|membership|data|sibling|source), a server label, exact total
-// (capped at 1000 → totalCapped), and ~10 inline items (full nodes).
-export interface GraphRelation {
-  key: string; kind: string; label: string;
-  total: number; totalCapped: boolean; items: GraphItem[];
-}
-
-function parseRelation(r: any): GraphRelation {
-  return {
-    key: String(r?.key ?? ""), kind: String(r?.kind ?? ""), label: String(r?.label ?? ""),
-    total: Number(r?.total ?? 0), totalCapped: Boolean(r?.total_capped),
-    items: Array.isArray(r?.items) ? r.items : [],
-  };
-}
-
-// Overview form: every non-empty relation group on a node, in server order.
-export async function graphOverview(nodeId: string): Promise<{ node: GraphNode; relations: GraphRelation[] }> {
-  const p = new URLSearchParams({ node_id: nodeId });
-  const data = await get(`/related?${p.toString()}`);
-  return {
-    node: data?.node ?? { id: nodeId, name: "", type: "entity" },
-    relations: Array.isArray(data?.relations) ? data.relations.map(parseRelation) : [],
-  };
 }
 
 export async function graphRelated(
@@ -80,7 +56,7 @@ export async function graphRelated(
   // `relation` is the group key: fixed ("metrics", "entities", "siblings") or a
   // named-edge key from an overview ("rel:has_team"). Replaces the deprecated
   // relation_type param (#27511).
-  opts: { relation: string; q?: string; limit?: number },
+  opts: { relation: string; q?: string; limit?: number; label?: string },
 ): Promise<GraphItem[]> {
   const p = new URLSearchParams({
     node_id: nodeId, relation: opts.relation, limit: String(opts.limit ?? 6),
@@ -90,6 +66,9 @@ export async function graphRelated(
   // is what we want as a fallback.
   const q = opts.q?.trim();
   if (q) p.set("q", q);
+  // `label` (e.g. METRIC) is a ranking boost within the relation — ranks matching-label
+  // items higher without excluding others; totals are unchanged.
+  if (opts.label) p.set("label", opts.label);
   const data = await get(`/related?${p.toString()}`);
   return Array.isArray(data?.relation?.items) ? data.relation.items : [];
 }
