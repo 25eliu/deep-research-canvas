@@ -10,3 +10,6 @@ next-env.d.ts
 
 # Internal agent planning/spec docs — kept locally, not published
 docs/superpowers/
+
+# Local demo source recordings (only the generated gif is published)
+docs/*.mov
