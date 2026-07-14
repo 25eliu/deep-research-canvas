@@ -14,10 +14,13 @@ private npm — requires `NPM_TOKEN` in `.npmrc`). **No Graphy Agents API.**
 
 ## UX / flag threading
 
-- Toggle chip "Graphy" in the ChatPanel input row, off by default, **per-turn**
-  (state at submit time is what the run uses).
-- Threading: `onSend({ text, graphy })` → `page.tsx` → `AgentRequest.graphy` →
-  `/api/agent` route → provider run → `ResearchCtx.graphy`.
+- "graphy chart" switch mirroring the existing `takoAnswer` pattern: on the
+  Landing controls row (before the first question) and in the canvas topbar
+  (for follow-up turns), off by default. **Per-turn semantics**: the switch
+  state at submit time is what that run uses.
+- Threading (same path as `takoAnswerEnabled`): `Session.graphy` →
+  `AgentRequest.graphyEnabled` → `/api/agent` route (defaults `false`) →
+  provider run → read as `ctx.req.graphyEnabled`.
 - Only `composeReport` reads the flag; decompose/leaves/expand ignore it.
 
 ## Server-side modeling
