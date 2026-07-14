@@ -1,11 +1,11 @@
 {
-  "name": "canvas-tako",
+  "name": "deep-research-canvas",
   "version": "0.1.0",
   "private": true,
-  "description": "Spatial research canvas demo for the Tako API: chat-driven board of cited data cards with swappable gpt/claude/tako providers.",
+  "description": "Deep Research Canvas — turn a research question into a spatial board of cited, connected data cards converging on a verdict, with swappable gpt/claude/tako providers.",
   "license": "MIT",
   "author": "Tako",
-  "homepage": "https://tako.com",
+  "homepage": "https://github.com/25eliu/deep-research-canvas",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
