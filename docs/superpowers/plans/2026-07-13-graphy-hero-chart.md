@@ -834,7 +834,18 @@ git commit -m "feat(ui): graphy chart toggle (landing + topbar) threaded to the 
 
 ---
 
-### Task 6: Client render — `@graphysdk/core` install gate + `GraphyHero` + report slot
+### Task 6: Client render — `GraphyHero` + report slot
+
+> **REVISED 2026-07-13 (Eric's decision):** `@graphysdk/core` is private npm, no
+> credentials exist, and Graphy has no anonymous create-and-embed API. Task 6 now
+> renders the GraphyConfig LOCALLY with recharts (existing chart idioms from
+> `components/charts/theme.ts`); the SDK swap happens later behind the same
+> component boundary when a token exists. Steps 1 (npm install gate) and the SDK
+> import in Step 2 are superseded — see the revised task brief
+> (`.superpowers/sdd/task-6-brief.md`) for the executed version. The original
+> text below is kept for the eventual SDK swap-in.
+
+#### Original (superseded) task text — kept for the future SDK swap
 
 **Files:**
 - Modify: `.npmrc` (create if absent; token via env, never inline)

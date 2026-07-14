@@ -70,11 +70,17 @@ silent degradation, `ctx.notes` entry only, never a user-facing error.
 
 ## Client rendering
 
+- **Revised 2026-07-13 (Eric):** `@graphysdk/core` is a private npm package
+  and no Graphy credentials exist yet; there is no anonymous create-and-embed
+  API. The render layer is LOCAL for now: `components/GraphyHero.tsx` renders
+  the `GraphyConfig` with recharts using the existing chart idioms
+  (`components/charts/theme.ts` — SERIES_COLORS, axis/tooltip theming).
+  The config shape stays Graphy-native (`type` + `data.columns`/`data.rows`),
+  so swapping in `<GraphProvider config={...}><Graph /></GraphProvider>` later
+  is a one-component change once an npm token exists.
 - `AnswerReport.tsx` renders `report.graphy` between the verdict div and the
-  block loop: `<GraphProvider config={...}><Graph /></GraphProvider>`,
-  readonly mode, wrapped in a small `components/GraphyHero.tsx`.
-- Height/width fit the node card; no hard-coded iframe heights (SDK renders
-  natively, not an iframe).
+  block loop.
+- Height/width fit the node card.
 
 ## Error handling
 
