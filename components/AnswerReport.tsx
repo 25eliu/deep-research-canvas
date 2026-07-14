@@ -2,6 +2,7 @@
 import type { AnswerReport as Report } from "@/lib/schema";
 import Markdown from "./Markdown";
 import MiniChart from "./MiniChart";
+import GraphyHero from "./GraphyHero";
 import ComparisonChart from "./report/ComparisonChart";
 import Leaderboard from "./report/Leaderboard";
 import FactorSections from "./report/FactorSections";
@@ -15,6 +16,7 @@ export default function AnswerReport({ report }: { report: Report }) {
   return (
     <div className="report">
       <div className="report-verdict"><Markdown text={report.verdict} /></div>
+      {report.graphy ? <GraphyHero block={report.graphy} /> : null}
       {report.blocks.map((b, i) => {
         switch (b.kind) {
           case "prose":

@@ -597,6 +597,8 @@ a:hover { text-decoration: underline; }
 .report-table tbody th { font-weight: 600; color: var(--ink); }
 .report-table td { font-family: var(--font-mono); font-variant-numeric: tabular-nums; color: var(--ink-soft); }
 .report-chart-title { font-size: 11px; font-weight: 600; color: var(--muted); margin-bottom: 4px; }
+.report-graphy { margin: 10px 0 14px; }
+.report-graphy-subtitle { font-size: 12px; opacity: 0.65; margin: -2px 0 8px; }
 /* recharts frames: charts inherit the card type, tooltips float above card chrome */
 .chart-frame { width: 100%; }
 .chart-frame .recharts-wrapper { font-family: var(--font-sans); }
