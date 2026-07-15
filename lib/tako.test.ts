@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { mapCard, mapWebResult, relevanceKeeps, takoSearch, takoAnswer, type TakoCallMeta } from "./tako";
+import { mapCard, mapWebResult, relevanceKeeps, takoSearch, takoAnswer, takoContents, type TakoCallMeta } from "./tako";
 
 describe("mapCard", () => {
   it("maps a v3 card shape defensively", () => {
@@ -45,6 +45,66 @@ describe("mapWebResult", () => {
     });
     expect(w.description).toBe("short snippet"); // node/summary stays short
     expect(w.content).toBe("the full multi-paragraph page content the agent reads"); // synthesis reads this
+  });
+
+  it("unwraps the live content ENVELOPE object (text at .data)", () => {
+    // Verified live 2026-07-14: /v3/search web_results[].content is an object
+    // {content_format, cost, data, total_rows, …} — the page text is at .data.
+    const w = mapWebResult({
+      title: "T", url: "https://x.com", snippet: "snip",
+      content: { content_format: "text", cost: 0.001, data: "full page text from the envelope", truncated: false },
+    });
+    expect(w.content).toBe("full page text from the envelope");
+  });
+
+  it("drops a contentless envelope (data null) without throwing", () => {
+    const w = mapWebResult({
+      title: "T", url: "https://x.com", snippet: "snip",
+      content: { content_format: null, cost: 0.001, data: null },
+    });
+    expect(w.content).toBeUndefined();
+    expect(w.description).toBe("snip"); // snippet fallback intact
+  });
+});
+
+describe("takoContents", () => {
+  const OLD_KEY = process.env.TAKO_API_KEY;
+  beforeEach(() => { process.env.TAKO_API_KEY = "test-key"; });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    if (OLD_KEY === undefined) delete process.env.TAKO_API_KEY;
+    else process.env.TAKO_API_KEY = OLD_KEY;
+  });
+  const okFetch = (body: unknown) =>
+    vi.fn(async () => ({ ok: true, status: 200, json: async () => body }) as any);
+
+  it("classifies a card series as csv via the live content_format field", async () => {
+    // Verified live 2026-07-14: the field is `content_format`, NOT `format`.
+    vi.stubGlobal("fetch", okFetch({
+      contents: [{ content_format: "csv", data: "Timestamp,V\n2024,1", total_rows: 300, truncated: true }],
+    }));
+    const c = await takoContents("https://tako.com/card/x/");
+    expect(c.csv).toBe("Timestamp,V\n2024,1");
+    expect(c.text).toBeUndefined();
+    expect(c.totalRows).toBe(300);
+    expect(c.truncated).toBe(true);
+  });
+
+  it("non-csv content lands in text (web page extraction)", async () => {
+    vi.stubGlobal("fetch", okFetch({
+      contents: [{ content_format: null, data: "extracted page text" }],
+    }));
+    const c = await takoContents("https://example.com/article");
+    expect(c.text).toBe("extracted page text");
+    expect(c.csv).toBeUndefined();
+  });
+
+  it("keeps legacy `format` field back-compat", async () => {
+    vi.stubGlobal("fetch", okFetch({
+      contents: [{ format: "csv", data: "Timestamp,V\n2024,1" }],
+    }));
+    const c = await takoContents("https://tako.com/card/x/");
+    expect(c.csv).toBe("Timestamp,V\n2024,1");
   });
 });
 

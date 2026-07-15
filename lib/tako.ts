@@ -43,7 +43,10 @@ export function mapCard(c: any): TakoCard {
 // the cardId filter and dedup, and carries provenance for the synthesis.
 export function mapWebResult(w: any): TakoCard {
   const url = w.url || w.webpage_url;
-  const content = asStr(w.content); // full page text Tako fetched — the agent reads this in synthesis
+  // Full page text Tako fetched — the agent reads this in synthesis. The live API wraps
+  // it in a content ENVELOPE object ({content_format, cost, data, …} — the text is at
+  // .data, often null when Tako didn't inline the page); accept a plain string too.
+  const content = asStr(w.content) ?? asStr(w.content?.data);
   return {
     cardId: url || w.title,
     title: asStr(w.title) || asStr(w.source_name) || "Web source",
@@ -182,7 +185,9 @@ export async function takoContents(
   const data = await post("/v1/contents", { url, mode: opts.mode || "inline" });
   const c = (data?.contents || [])[0] || {};
   const out: TakoContents = { totalRows: c.total_rows ?? undefined, truncated: !!c.truncated };
-  if (c.format === "csv") out.csv = asStr(c.data);
+  // The live response field is `content_format` (verified 2026-07-14); `format` is
+  // kept for back-compat. Misreading this classifies every card CSV as page text.
+  if ((c.content_format ?? c.format) === "csv") out.csv = asStr(c.data);
   else out.text = asStr(c.data);
   return out;
 }

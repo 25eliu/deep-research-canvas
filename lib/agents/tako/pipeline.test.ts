@@ -85,7 +85,8 @@ vi.mock("../../tako", () => ({
   takoSearch: vi.fn(async (q: string, opts: any = {}) => {
     const lq = q.toLowerCase();
     let cards: any[];
-    if (lq.includes("web")) cards = [{ cardId: "web1", title: "News article", webpageUrl: "https://news.example.com/a", source: "news.example.com" }]; // no embed → web source
+    if (lq.includes("inline")) cards = [{ cardId: "web2", title: "Inline article", webpageUrl: "https://news.example.com/b", source: "news.example.com", content: "INLINE PAGE TEXT already fetched by search" }]; // web source WITH inline text
+    else if (lq.includes("web")) cards = [{ cardId: "web1", title: "News article", webpageUrl: "https://news.example.com/a", source: "news.example.com" }]; // no embed → web source
     else if (lq.includes("nvidia")) cards = [{ cardId: "nvda", title: "NVDA revenue $75.2B", embedUrl: "https://e/nvda", webpageUrl: "https://w/nvda", source: "S&P Global" }];
     else if (lq.includes("amd")) cards = [{ cardId: "amd", title: "AMD revenue $5.78B", embedUrl: "https://e/amd", webpageUrl: "https://w/amd", source: "S&P Global" }];
     else cards = [{ cardId: "c-" + lq.slice(0, 8), title: "card " + q, embedUrl: "https://e/" + lq.slice(0, 8), source: "Tako" }];
@@ -399,6 +400,39 @@ describe("runTakoInitial — recursive research tree", () => {
     const synthPatch = result.nodeOps.find((o: any) => o.op === "update_node" && o.id === "synth" && o.patch?.sources) as any;
     expect(synthPatch).toBeTruthy();
     expect(synthPatch.patch.sources.some((s: any) => s.url === "https://news.example.com/a")).toBe(true);
+  });
+
+  it("web source without inline text is grounded via /v1/contents; fetched text feeds the leaf synthesis", async () => {
+    h.plans["compare Nvidia and AMD"] = twoBranchPlan;
+    h.related = ["web coverage"]; // grounded queries → "Nvidia web coverage" → a content-less web card
+
+    const result = await runTakoInitial(req, () => {});
+    const { takoContents } = await import("../../tako");
+    // The leaf pulled the page's extracted text through the contents API…
+    expect(vi.mocked(takoContents)).toHaveBeenCalledWith("https://news.example.com/a", { mode: "inline" });
+    // …recorded as a /v1/contents trace call carrying the web URL…
+    const contentsCalls = (result.trace.calls ?? []).filter((c) => c.endpoint === "/v1/contents");
+    expect(contentsCalls.some((c) => c.cards[0]?.url === "https://news.example.com/a")).toBe(true);
+    // …and the fetched text (the mock returns h.contentsCsv for any URL) reached
+    // the leaf synthesis's WEB_SOURCES content, not just the snippet.
+    const { streamAnswer } = await import("../../llm");
+    const leafCall = vi.mocked(streamAnswer).mock.calls.find(([o]: any) => o.label === "leaf-synth") as any;
+    expect(leafCall).toBeTruthy();
+    expect(String(leafCall[0].prompt)).toContain("Timestamp,V");
+  });
+
+  it("web source WITH inline search text skips the contents fetch and synthesizes from the inline text", async () => {
+    h.plans["compare Nvidia and AMD"] = twoBranchPlan;
+    h.related = ["inline coverage"]; // grounded queries → "Nvidia inline coverage" → web card carrying content
+
+    await runTakoInitial(req, () => {});
+    const { takoContents } = await import("../../tako");
+    // The inline text is already the search's page extraction — no second fetch.
+    expect(vi.mocked(takoContents)).not.toHaveBeenCalledWith("https://news.example.com/b", { mode: "inline" });
+    const { streamAnswer } = await import("../../llm");
+    const leafCall = vi.mocked(streamAnswer).mock.calls.find(([o]: any) => o.label === "leaf-synth") as any;
+    expect(leafCall).toBeTruthy();
+    expect(String(leafCall[0].prompt)).toContain("INLINE PAGE TEXT");
   });
 
   it("no findings → no synth node → chat fallback", async () => {

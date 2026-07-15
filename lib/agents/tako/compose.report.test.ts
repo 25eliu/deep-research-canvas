@@ -145,6 +145,16 @@ describe("composeReport v3 — deterministic gather + GPT emit", () => {
     expect(String(reportCall.prompt)).not.toContain("FULLPAGECONTENT"); // no 1.5k-char content inlined
   });
 
+  it("get_web_content falls back to the per-turn contents cache when the source has no inline text", async () => {
+    const ctx = ctxWithCard();
+    // A leaf pulled this page's text via /v1/contents (no inline content from search).
+    ctx.webSources.push({ title: "Article", source: "Reuters", url: "https://web/y", summary: "snip" });
+    ctx.contents.cache.set("https://web/y", "CACHED PAGE TEXT the leaf fetched this turn");
+    h.readWebUrls = ["https://web/y"];
+    await composeReport(ctx, "q");
+    expect(h.webToolOut).toContain("CACHED PAGE TEXT");
+  });
+
   it("gather failure falls back to composing without card contents", async () => {
     h.gatherFails = true;
     const ctx = ctxWithCard();

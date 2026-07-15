@@ -294,7 +294,9 @@ async function gatherCardContents(
           execute: async ({ url }) => {
             const w = ctx.webSources.find((s) => s.url === url);
             if (!w) return "unknown url";
-            return (w.content || w.summary || "").slice(0, WEB_TOOL_CONTENT_CAP) || "no content available";
+            // Inline text when search provided it; else the page text a leaf pulled
+            // via /v1/contents this turn (per-turn cache); else the snippet.
+            return (w.content || ctx.contents.cache.get(url) || w.summary || "").slice(0, WEB_TOOL_CONTENT_CAP) || "no content available";
           },
         }),
       },

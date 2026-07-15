@@ -16,7 +16,8 @@ const OPENAI = "openai" as const;
 
 export const SYNTH_ID = "synth";
 const TOTAL_RESEARCH_CAP = 20; // non-root research nodes (global backstop: ~8 root subs + ~12 descendants)
-const CONTENTS_CAP = 12; // max tako-contents (CSV/text) fetches per turn — bounds cost + latency
+const CONTENTS_CAP = 16; // max tako-contents (CSV/text) fetches per turn — bounds cost + latency; shared by card CSVs (first claim) and web-page text
+const WEB_TEXT_FETCHES = 2; // web pages pulled via /v1/contents per leaf — the rest keep their search snippet
 const CSV_EXCERPT = 1800; // chars of a card's CSV series handed to the synthesis LLM
 
 function errorMessage(e: unknown): string {
@@ -272,6 +273,29 @@ export async function researchLeaf(
     if (fig) ctx.figures.push(fig);
   }));
 
+  // Same grounding ladder for web sources: prefer the page text search already inlined
+  // (card.content — live search often returns a contentless envelope); when absent, pull
+  // the page's extracted full text via /v1/contents, budgeted/cached/traced exactly like
+  // the CSV pulls above. Runs AFTER the card CSV loop so structured series keep first
+  // claim on the contents budget, and only for the top few sources per leaf. The per-turn
+  // cache also serves these pages to the composer's get_web_content tool later.
+  const webTextByFinding = new Map<string, string>();
+  await Promise.all(webSources.slice(0, WEB_TEXT_FETCHES).map(async (f) => {
+    if (f.card.content || !f.card.webpageUrl) return;
+    const text = await fetchContents(ctx, f.card.webpageUrl, (info) => {
+      const call: TakoCallRecord = {
+        callId: `${nodeId}:contents:${calls.length}`, nodeId,
+        query: f.title, endpoint: "/v1/contents", effort: "fast", ms: info.ms,
+        cards: [{ id: f.card.cardId, title: f.title, source: f.source, url: f.url }],
+        ...(info.error ? { error: info.error } : {}),
+      };
+      calls.push(call);
+      ctx.calls.push(call);
+      ctx.emit?.({ type: "tako_call", call });
+    });
+    if (text) webTextByFinding.set(f.nodeId, text);
+  }));
+
   // Root: never stream prose — the composed answer report (Claude, at the end)
   // is the answer. Create the empty synth block and record this leaf's material.
   if (root) {
@@ -290,7 +314,8 @@ export async function researchLeaf(
   });
   const webMenu = webSources.map((f) => ({
     title: f.title, source: f.source, snippet: f.card.description,
-    content: (f.card.content || f.card.description || "").slice(0, WEB_CONTENT_CAP),
+    // Inline search text first, then the page text fetched above, then the snippet.
+    content: (f.card.content || webTextByFinding.get(f.nodeId) || f.card.description || "").slice(0, WEB_CONTENT_CAP),
   }));
   ctx.emit?.({ type: "synthesis", phase: "start", nodeId, kind: "leaf", inputs: { findingTitles: [...dataFindings, ...webSources].map((f) => f.title) } });
   const st = Date.now();
