@@ -154,7 +154,7 @@ describe("live graph calls", () => {
     const views = stepsToDisplay([
       { t: "reasoning", nodeId: "rq_x", depth: 1, question: "nvidia revenue", kind: "leaf" },
       { t: "graph", nodeId: "rq_x", call: { endpoint: "graph/search", params: { q: "NVIDIA Corporation", types: "entity", label: "ORG" }, ms: 40, results: [{ name: "NVIDIA Corporation" }] } },
-      { t: "graph", nodeId: "rq_x", call: { endpoint: "graph/related", params: { node_id: "nv-1", relation: "metrics", q: "revenue", label: "METRIC" }, subject: "NVIDIA Corporation", ms: 55, results: [{ name: "Total Revenue" }] } },
+      { t: "graph", nodeId: "rq_x", call: { endpoint: "graph/related", params: { node_id: "nv-1", relation: "metrics", q: "revenue" }, subject: "NVIDIA Corporation", ms: 55, results: [{ name: "Total Revenue" }] } },
     ]);
     expect(views).toHaveLength(1);
     expect(views[0].graphCalls).toHaveLength(2);

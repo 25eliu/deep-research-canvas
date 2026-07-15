@@ -91,15 +91,15 @@ async function recordedSearch(
 
 async function recordedRelated(
   rec: GraphCallRecord[], nodeId: string,
-  opts: { relation: string; q?: string; limit?: number; subject?: string; label?: string },
+  opts: { relation: string; q?: string; limit?: number; subject?: string },
   onCall?: (c: GraphCallRecord) => void,
 ): Promise<GraphItem[]> {
   const q = opts.q?.trim();
-  const params = { node_id: nodeId, relation: opts.relation, ...(q ? { q } : {}), ...(opts.label ? { label: opts.label } : {}), limit: opts.limit ?? 6 };
+  const params = { node_id: nodeId, relation: opts.relation, ...(q ? { q } : {}), limit: opts.limit ?? 6 };
   const subject = opts.subject ? { subject: opts.subject } : {};
   const t = Date.now();
   try {
-    const items = await graphRelated(nodeId, { relation: opts.relation, ...(q ? { q } : {}), ...(opts.limit ? { limit: opts.limit } : {}), ...(opts.label ? { label: opts.label } : {}) });
+    const items = await graphRelated(nodeId, { relation: opts.relation, ...(q ? { q } : {}), ...(opts.limit ? { limit: opts.limit } : {}) });
     const call: GraphCallRecord = { endpoint: "graph/related", params, ...subject, ms: Date.now() - t, results: items.map(compactResult) };
     rec.push(call);
     onCall?.(call);
@@ -258,7 +258,7 @@ async function resolveGraph(ctx: ResearchCtx, lookup: GraphLookup, researchNodeI
       const items = await memoized(ctx.graphMemo.related, `${p.node.id}|${p.q ?? ""}|${limit}`, () =>
         recordedRelated(
           graphCalls, p.node.id,
-          { relation: "metrics", ...(p.q ? { q: p.q } : {}), limit, subject: p.node.name, label: "METRIC" },
+          { relation: "metrics", ...(p.q ? { q: p.q } : {}), limit, subject: p.node.name },
           onCall,
         ));
       for (const i of items) {
@@ -285,7 +285,7 @@ async function resolveGraph(ctx: ResearchCtx, lookup: GraphLookup, researchNodeI
       // .slice(): the memo hands every consumer the SAME array — this node's menu must
       // stay mutation-independent of other nodes sharing the cache entry.
       menu.items = (await memoized(ctx.graphMemo.related, `${r.node.id}||${FULL_MENU_LIMIT}`, () =>
-        recordedRelated(graphCalls, r.node.id, { relation: "metrics", limit: FULL_MENU_LIMIT, subject: r.node.name, label: "METRIC" }, onCall))).slice();
+        recordedRelated(graphCalls, r.node.id, { relation: "metrics", limit: FULL_MENU_LIMIT, subject: r.node.name }, onCall))).slice();
     } catch (e: unknown) {
       ctx.notes.push(`graph lookup failed for "${r.node.name}" — ${errorMessage(e)}`);
     }

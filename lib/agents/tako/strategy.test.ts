@@ -165,7 +165,7 @@ describe("graphStrategy — entity-first search (candidate names + label boost, 
     expect(relatedNodes).not.toContain("g2"); // …but the 4th/5th do not (top-3, label boost ranks the right node up)
   });
 
-  it("calls related once per node×filter — relation=metrics, label=METRIC, q=the short filter, limit 8", async () => {
+  it("calls related once per node×filter — relation=metrics, q=the short filter, limit 8", async () => {
     h.searchNodes = [TESLA];
     h.relatedByNodeQ = {
       "tesla-id|revenue": [{ id: "m1", name: "Total Revenue", aliases: [] }],
@@ -173,8 +173,8 @@ describe("graphStrategy — entity-first search (candidate names + label boost, 
     };
     await graphStrategy.leafQueries(stubCtx(), "q", lookup(["Tesla"], ["revenue", "profit"]));
     expect(h.relatedCalls).toHaveLength(2);
-    expect(h.relatedCalls[0]).toMatchObject({ nodeId: "tesla-id", relation: "metrics", q: "revenue", limit: 8, label: "METRIC" });
-    expect(h.relatedCalls[1]).toMatchObject({ nodeId: "tesla-id", relation: "metrics", q: "profit", limit: 8, label: "METRIC" });
+    expect(h.relatedCalls[0]).toMatchObject({ nodeId: "tesla-id", relation: "metrics", q: "revenue", limit: 8 });
+    expect(h.relatedCalls[1]).toMatchObject({ nodeId: "tesla-id", relation: "metrics", q: "profit", limit: 8 });
   });
 
   it("filters by the SHORT filter term — never the question or the entity name", async () => {
@@ -338,7 +338,7 @@ describe("graphStrategy grounded compose", () => {
     expect((ent?.params as Record<string, unknown>).subtype).toBeUndefined(); // subtype is no longer a request param
     expect(ent?.results.map((r) => r.name)).toEqual(["Tesla"]);
     const rel = calls.find((c) => c.endpoint === "graph/related");
-    expect(rel?.params).toMatchObject({ node_id: "tesla-id", relation: "metrics", q: "revenue", limit: 8, label: "METRIC" });
+    expect(rel?.params).toMatchObject({ node_id: "tesla-id", relation: "metrics", q: "revenue", limit: 8 });
     expect(rel?.subject).toBe("Tesla"); // display name of the entity the fetch was for
     expect(rel?.results.map((r) => r.name)).toEqual(["Total Revenue"]);
   });
